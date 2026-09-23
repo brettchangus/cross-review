@@ -13,6 +13,8 @@ param(
 
     [string]$Model,
 
+    [string]$ExecutablePath,
+
     [ValidateSet('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')]
     [string]$ReasoningEffort,
 
@@ -20,6 +22,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'ReviewCliEnvironment.ps1')
+
+if ($PSBoundParameters.ContainsKey('ExecutablePath') -and [string]::IsNullOrWhiteSpace($ExecutablePath)) {
+    throw 'ExecutablePath must not be empty.'
+}
+if ($PSBoundParameters.ContainsKey('ExecutablePath') -and -not (Test-ReviewCodexExecutable -Path $ExecutablePath)) {
+    throw 'ExecutablePath must be a native codex.exe with codex-code-mode-host.exe beside it.'
+}
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     throw 'OutputPath must not be empty.'
@@ -75,7 +85,7 @@ $arguments.Add($OutputPath)
 
 $result = [ordered]@{
     schema_version = 1
-    executable = 'codex'
+    executable = if ($ExecutablePath) { (Resolve-Path -LiteralPath $ExecutablePath).ProviderPath } else { 'codex' }
     review_mode = $ReviewMode
     working_directory = $WorkingDirectory
     arguments = @($arguments)

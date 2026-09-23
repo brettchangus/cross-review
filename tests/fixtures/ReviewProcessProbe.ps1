@@ -26,7 +26,7 @@ switch ($Mode) {
         $childInfo.UseShellExecute = $false
         $childInfo.CreateNoWindow = $true
         $childInfo.WorkingDirectory = [IO.Path]::GetTempPath()
-        foreach ($argument in @('-NoProfile', '-Command', 'Start-Sleep -Seconds 6')) { $childInfo.ArgumentList.Add($argument) }
+        foreach ($argument in @('-NoProfile', '-Command', 'Start-Sleep -Seconds 15')) { $childInfo.ArgumentList.Add($argument) }
         [Diagnostics.Process]::Start($childInfo).Dispose()
         [Console]::Out.WriteLine('parent complete')
         exit 0

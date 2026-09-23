@@ -220,7 +220,7 @@ Codex-led run folders use the `codex-led` variant under the shared `.reviews/run
 
 ### Tooling
 
-In the version-4 run context, keep `pr_metadata`, `claude_review`, `codex_review`, and the independent reviewers' model/effort fields above. Set `claude_model_source: explicit` only when a model was actually supplied to the child; otherwise use null model and `cli_default_unresolved`. Claude's independent effort remains `high` with source `explicit`. Add:
+In the version-4 run context, keep `pr_metadata`, `claude_review`, `codex_review`, and the independent reviewers' model/effort fields above. Set `claude_model_source: explicit` when a discovered model or alias was supplied to the child; otherwise use null model and `cli_default_unresolved`. A supplied alias is recorded verbatim, without guessing its resolved version. Claude's independent effort remains `high` with source `explicit`. Add:
 
 ```json
 {

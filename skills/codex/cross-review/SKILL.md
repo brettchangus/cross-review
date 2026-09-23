@@ -54,12 +54,15 @@ Run from the original repository root. Batch estimation, CLI availability/help c
   -HistoryPath '<original-root>/.reviews/codex-led/history.jsonl' `
   -GlobalHistoryPath '<user-profile>/.codex/cross-review/history.jsonl' `
   -RepositoryId <id> -RepositoryName <name>
-& "<skill_dir>/scripts/Get-ReviewModelInfo.ps1" -ClaudeEffort high -ClaudeEffortSource explicit -CodexReasoningEffort high
+& "<skill_dir>/scripts/Get-ReviewModelInfo.ps1" `
+  -DiscoverClaudeConfiguration -ReviewWorkspace <original-root> `
+  -ClaudeEffort high -ClaudeEffortSource explicit -CodexReasoningEffort high `
+  -RequireCompleteCodexExecutable
 ```
 
-Retain the estimator's `base_commit`, `head_commit`, `review_size`, and `estimate`; stop if `has_changes` is false. Resolve native `claude` and `codex` executables, not .cmd/.bat shims. Check Claude supports print mode, stream-json, explicit effort, no session persistence, and the permission flags used by the helper. Check Codex supports the scoped review invocation, JSONL event output, and an explicit `approval_policy="never"` configuration override. Report unsupported capabilities before approval.
+Retain the estimator's `base_commit`, `head_commit`, `review_size`, and `estimate`; stop if `has_changes` is false. Resolve native `claude` and use the diagnostic's `codex.executable` for Codex. It selects a native `codex.exe` only when `codex-code-mode-host.exe` is beside it; a `codex.exe` from `.sandbox-bin` without that host is incomplete for this review. Stop if no complete executable is found. Check Claude supports print mode, stream-json, explicit effort, no session persistence, and the permission flags used by the helper. Check the resolved Codex executable supports the scoped review invocation, JSONL event output, and an explicit `approval_policy="never"` configuration override. Report unsupported capabilities before approval.
 
-The diagnostics describe the independent Codex CLI, not this session. If the user selected a Claude model, pass it explicitly to both Claude calls and record it as explicit; otherwise label the default unresolved. Do not guess a Claude model from the Codex session. Record this session's adjudicator model/effort only if exposed. Claude review effort is high and Claude comparison effort is medium. Codex's independent review is likewise pinned to explicit `high` reasoning rather than inheriting the CLI's configured `model_reasoning_effort`, which diagnostics cannot read back; record it as explicit. Pinning every stage keeps the run reproducible, but do not assume the two CLIs' effort scales correspond.
+The diagnostics describe the independent Codex CLI, not this session. They resolve Claude's configured model from `ANTHROPIC_MODEL`, settings environment, settings model, then `ANTHROPIC_DEFAULT_MODEL`, using `CLAUDE_CONFIG_DIR` and file-based managed settings where present; an alias such as `opus` remains an alias, not a guessed version. Pass a resolved Claude selection explicitly to both Claude calls and record it as explicit in run artifacts; if unresolved, label the CLI default unresolved. The Codex diagnostic and reviewer subprocess use the same complete executable and `CODEX_HOME`: an explicit environment value, or the `.codex` directory under `USERPROFILE`. If Codex's model remains unresolved, do not infer it from a config file the subprocess will not use. Record this session's adjudicator model/effort only if exposed. Claude review effort is high and Claude comparison effort is medium. Codex's independent review is pinned to explicit `high` reasoning. Pinning the stage efforts and passing discovered models keeps the run reproducible, but do not assume the two CLIs' effort scales correspond.
 
 Display the complete preflight to the user:
 
@@ -72,9 +75,9 @@ Repository: <identity>
 Source: <ref @ frozen commit>
 Target: <ref @ frozen commit>
 PR metadata: <MCP, CLI fallback with reason, or why not queried>
-Claude independent review: native code-review — <model/default unresolved>, high (explicit)
-Codex independent review: native exec review — <model/default unresolved>, high (explicit)
-Claude comparison: <model/default unresolved>, medium (explicit)
+Claude independent review: native code-review — <configured model or default unresolved, with discovery source>, high (explicit)
+Codex independent review: native exec review — <model or default unresolved, with discovery source>, high (explicit)
+Claude comparison: <same Claude model or default unresolved>, medium (explicit)
 Codex final adjudicator: this session — <model and effort or unavailable>
 Workspace: <original checkout or detached worktree at source commit>
 Review size: <band, files, added/deleted lines, commits, binary/oversized files>
@@ -90,21 +93,25 @@ When an appropriate user-input tool is available, include the full block in its 
 
 After approval, record `started_at` and `started_at_unix_ms`, generate a UUID `review_id`, and retain a unique temporary run directory outside the repository. All paths passed to helpers below are absolute. Show concise stage progress using the host's available plan/progress tool or commentary; only the two independent reviews overlap.
 
+The Codex CLI writes runtime files under `CODEX_HOME` even with `--ephemeral`. Before launching reviewers, ensure the supervisor has host filesystem access to that directory. If the host sandbox blocks it, request the narrow host permission needed for the supervisor call; keep Codex's own `--sandbox read-only` and `approval_policy="never"` unchanged. Do not start a reviewer with an inaccessible Codex home or an incomplete executable.
+
 Run `scripts/Initialize-ReviewExclusion.ps1` from the original root and report changes to local Git exclusions. Validate storage with `scripts/Assert-ReviewStorageSafe.ps1 -RepositoryPath <original-root> -Variant codex-led` and stop if it fails. Do not create the run folder yet; step 4 creates it once both reviews succeed, so a run that fails earlier leaves nothing in `.reviews/runs/`. Do not run two Codex-led reviews concurrently in the same checkout.
 
 Uncommitted mode always uses the original root. For PR/branch mode, use the original checkout only when HEAD equals the frozen source commit and status is clean outside `.reviews/**`. Otherwise create a detached worktree at `<temporary-run-directory>/workspace` using `git -C <original-root> worktree add --detach <path> <source-commit>`. Keep it until adjudication finishes. If permissions prevent creation, stop and report the required access; do not broaden permissions or review the wrong checkout.
 
 The host session stays in the original checkout. Pin external processes via their WorkingDirectory/--cd, and use absolute paths or explicit workdir for every source read during final adjudication. A shell directory change is not a session switch.
 
+When a detached worktree is used, run `Get-ReviewModelInfo.ps1` again with `-DiscoverClaudeConfiguration -ReviewWorkspace <review-workspace> -ProjectLocalSettingsPath <original-root>/.claude/settings.local.json -SkipCodexDiagnostics` and the same Claude effort arguments. Compare only its Claude selection with preflight; Codex doctor does not need to run twice. If the Claude selection differs, show the revised model and reconfirm before starting either reviewer; the frozen source may contain different shared project settings from the original checkout.
+
 Read [references/artifact-contract.md](references/artifact-contract.md), including its version-4 section. Write schema-version-4 `run-context.json` in the temporary run directory, copying estimator objects verbatim and recording the frozen scope, original local identity, timestamps, and per-stage tooling. Never store display fallback labels as model identifiers.
 
 ## 4. Independent reviews, concurrently
 
-Build two invocation manifests using the helpers, saving their JSON outputs outside the repository. Omit optional model/effort parameters when unresolved and BaseCommit in uncommitted mode:
+Build two invocation manifests using the helpers, saving their JSON outputs outside the repository. Pass each discovered model explicitly so the review uses the model shown at preflight. Omit model parameters only when unresolved, and omit BaseCommit in uncommitted mode:
 
 ```powershell
 & "<skill_dir>/scripts/New-CodexReviewInvocation.ps1" `
-  -ReviewMode <mode> -WorkingDirectory <review-workspace> `
+  -ReviewMode <mode> -WorkingDirectory <review-workspace> -ExecutablePath <diagnostic codex.executable> `
   [-BaseCommit <frozen-target-commit>] -OutputPath '<temporary-run-directory>/codex-independent.md' `
   -StructuredDiagnostics [-Model <CLI-model>] -ReasoningEffort high
 

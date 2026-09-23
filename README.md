@@ -64,7 +64,7 @@ Both reviewers run at pinned levels (Claude `/code-review high`, Codex reasoning
 
 Uncommitted and branch reviews need neither Azure DevOps nor a configured remote.
 
-The Codex-led skill also needs native `claude` and `codex` executables on `PATH`, not `.cmd` or `.bat` shims.
+The Codex-led skill needs a native `claude` executable on `PATH` and a complete native Codex installation. It discovers `codex.exe` from `PATH` or standard local installation locations, and requires `codex-code-mode-host.exe` beside it. The Codex reviewer also needs write access to its runtime home under `CODEX_HOME`; its source-review sandbox remains read-only.
 
 > [!NOTE]
 > The skills are developed and tested on Windows.
@@ -243,7 +243,7 @@ The worktree is kept until adjudication finishes, so every source check sees the
 
 Every level is pinned explicitly. Without that, Claude would reuse the level from your last `/code-review` and Codex would use whatever `model_reasoning_effort` is in your configuration, which the skill cannot read back. The comparison pass runs lighter because judging existing findings is less work than finding them.
 
-The Claude model comes from the current session. The Codex model comes from read-only `codex doctor --json` diagnostics and is passed explicitly to both Codex stages when it is known. If a model cannot be determined without making a model request, the preflight says so rather than guessing. Each stage's settings are recorded separately, so a change in results can be traced to the setting that caused it.
+For Claude-led runs, the Claude model comes from the current session. For Codex-led runs, the skill discovers Claude's configured model from the environment or settings and passes it to both Claude stages when found. The Codex model comes from read-only `codex doctor --json` diagnostics; Codex-led diagnostics and reviewer processes use the same Codex home. If a model cannot be determined without making a model request, the preflight says so rather than guessing. Each stage's settings are recorded separately, so a change in results can be traced to the setting that caused it.
 
 </details>
 

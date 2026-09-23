@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'ReviewCliEnvironment.ps1')
 $jobs = [Collections.Generic.List[object]]::new()
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
 
@@ -55,17 +56,59 @@ function Complete-ReviewJob([object]$Job, [bool]$ForceCapture) {
     }
 }
 
+$invocations = foreach ($path in $InvocationPath) {
+    $fullPath = (Resolve-Path -LiteralPath $path).ProviderPath
+    if (Test-Path -LiteralPath ($fullPath + '.cancel')) { throw 'Review stage was cancelled.' }
+    $manifest = Get-Content -LiteralPath $fullPath -Raw | ConvertFrom-Json
+    [pscustomobject]@{
+        path = $fullPath
+        manifest = $manifest
+        is_codex = $manifest.executable -eq 'codex' -or [IO.Path]::GetFileName([string]$manifest.executable) -eq 'codex.exe'
+    }
+}
+if (@($invocations | Where-Object is_codex).Count -gt 0) {
+    $codexHome = Get-ReviewCodexHome
+    if ([string]::IsNullOrWhiteSpace($codexHome)) { throw 'Codex runtime home could not be determined.' }
+    $homeExists = Test-Path -LiteralPath $codexHome -PathType Container
+    if (-not $homeExists -and -not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+        throw "Codex runtime home is missing: '$codexHome'."
+    }
+    $probeDirectory = if ($homeExists) { $codexHome } else { Split-Path -Parent $codexHome }
+    if (-not (Test-Path -LiteralPath $probeDirectory -PathType Container)) {
+        throw "Codex runtime home parent is missing: '$probeDirectory'."
+    }
+    $probePath = Join-Path $probeDirectory ('.cross-review-write-probe-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($probePath, '')
+    } catch {
+        throw "Codex runtime home is not writable: '$codexHome'. Grant the supervisor host filesystem access to this directory before starting reviewers."
+    } finally {
+        if (Test-Path -LiteralPath $probePath -PathType Leaf) { Remove-Item -LiteralPath $probePath -Force }
+    }
+}
+
 try {
-    foreach ($path in $InvocationPath) {
-        $fullPath = (Resolve-Path -LiteralPath $path).ProviderPath
+    foreach ($entry in $invocations) {
+        $fullPath = $entry.path
         if (Test-Path -LiteralPath ($fullPath + '.cancel')) { throw 'Review stage was cancelled.' }
-        $invocation = Get-Content -LiteralPath $fullPath -Raw | ConvertFrom-Json
-        $command = Get-Command ([string]$invocation.executable) -CommandType Application -ErrorAction Stop | Select-Object -First 1
-        if ([IO.Path]::GetExtension($command.Source) -in @('.cmd', '.bat')) {
-            throw 'Use native CLI executables, not shell wrappers.'
+        $invocation = $entry.manifest
+        $isCodex = $entry.is_codex
+        $commandPath = if ($invocation.executable -eq 'codex') {
+            Get-ReviewCodexExecutable
+        } elseif ($isCodex) {
+            if (-not (Test-ReviewCodexExecutable -Path ([string]$invocation.executable))) {
+                throw 'The selected codex.exe is missing codex-code-mode-host.exe.'
+            }
+            (Resolve-Path -LiteralPath ([string]$invocation.executable)).ProviderPath
+        } else {
+            (Get-Command ([string]$invocation.executable) -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
         }
+        if ([string]::IsNullOrWhiteSpace($commandPath)) {
+            throw 'No complete native Codex executable with codex-code-mode-host.exe was found.'
+        }
+        if ([IO.Path]::GetExtension($commandPath) -in @('.cmd', '.bat')) { throw 'Use native CLI executables, not shell wrappers.' }
         $info = [Diagnostics.ProcessStartInfo]::new()
-        $info.FileName = $command.Source
+        $info.FileName = $commandPath
         $info.WorkingDirectory = [string]$invocation.working_directory
         $info.UseShellExecute = $false
         $info.CreateNoWindow = $true
@@ -75,6 +118,9 @@ try {
         $info.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
         $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
         $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+        if ($isCodex) {
+            if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $info.Environment['CODEX_HOME'] = $codexHome }
+        }
         foreach ($argument in $invocation.arguments) { $info.ArgumentList.Add([string]$argument) }
         $process = [Diagnostics.Process]::new()
         $process.StartInfo = $info
