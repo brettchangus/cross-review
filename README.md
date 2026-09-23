@@ -95,7 +95,7 @@ To install somewhere else, pass the full destination skill directory:
 
 The installer combines the host's skill with the shared scripts and references, so install with the script rather than copying the repository or a `skills/` directory directly.
 
-**Upgrading.** The installer never overwrites an existing installation. Move the old one aside first, then install again. If an install fails part way, the partial directory is left for inspection; move it aside before retrying.
+**Upgrading.** Run the installer again. It replaces an existing installation completely, so files removed from the repository do not linger, and any local edits to the installed copy are lost. The new copy is built beside the old one and swapped in only after every file is copied, so a failed install leaves the existing installation unchanged. The installer refuses to replace a destination that is not a `cross-review` skill directory.
 
 Restart Claude Code or Codex if the skill does not appear.
 

@@ -140,21 +140,44 @@ try {
     }
 
     try {
-        $beforeHash = (Get-FileHash -LiteralPath $skillPath).Hash
-        $rejected = $false
-        try { & $installScript -HostApp Claude -DestinationPath $skillDirectory | Out-Null }
-        catch {
-            if ($_.Exception.Message -notlike '*Destination already exists*') { throw }
-            $rejected = $true
-        }
-        if (-not $rejected -or (Get-FileHash -LiteralPath $skillPath).Hash -ne $beforeHash) {
-            throw 'Existing installation was not preserved'
+        $expectedHash = (Get-FileHash -LiteralPath $skillPath).Hash
+        $stalePath = Join-Path $skillDirectory 'scripts/Stale-Removed.ps1'
+        Set-Content -LiteralPath $stalePath -Value 'stale'
+        Add-Content -LiteralPath $skillPath -Value 'locally modified'
+        $replacement = & $installScript -HostApp Claude -DestinationPath $skillDirectory
+        if (-not $replacement.replaced) { throw 'Replacement was not reported' }
+        if ((Get-FileHash -LiteralPath $skillPath).Hash -ne $expectedHash) { throw 'Existing installation was not replaced' }
+        if (Test-Path -LiteralPath $stalePath) { throw 'Stale file survived replacement' }
+        if (@(Get-ChildItem -LiteralPath (Split-Path -Parent $skillDirectory) -Force).Count -ne 1) {
+            throw 'Staging or previous installation directory was left behind'
         }
         $script:passed++
-        Write-Output 'PASS install-refuses-existing-destination'
+        Write-Output 'PASS install-replaces-existing-installation'
     } catch {
         $script:failed++
-        Write-Output "FAIL install-refuses-existing-destination - $($_.Exception.Message)"
+        Write-Output "FAIL install-replaces-existing-installation - $($_.Exception.Message)"
+    }
+
+    try {
+        $unrelatedDestination = Join-Path $testRoot 'unrelated directory'
+        New-Item -ItemType Directory -Path $unrelatedDestination | Out-Null
+        $unrelatedFile = Join-Path $unrelatedDestination 'keep.txt'
+        Set-Content -LiteralPath $unrelatedFile -Value 'keep'
+        $rejected = $false
+        try { & $installScript -HostApp Claude -DestinationPath $unrelatedDestination | Out-Null }
+        catch {
+            if ($_.Exception.Message -notlike '*not a cross-review installation*') { throw }
+            $rejected = $true
+        }
+        if (-not $rejected -or -not (Test-Path -LiteralPath $unrelatedFile) -or
+            @(Get-ChildItem -LiteralPath $unrelatedDestination -Force).Count -ne 1) {
+            throw 'Unrelated destination was modified'
+        }
+        $script:passed++
+        Write-Output 'PASS install-refuses-unrelated-destination'
+    } catch {
+        $script:failed++
+        Write-Output "FAIL install-refuses-unrelated-destination - $($_.Exception.Message)"
     }
 
     # An isolated source tree tests missing hosts and duplicate resource paths
