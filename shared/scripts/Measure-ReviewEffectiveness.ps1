@@ -55,9 +55,14 @@ $reviewMode = ([string]$ledger.review_mode).ToLowerInvariant()
 if ($reviewMode -notin $validReviewModes) { throw "Ledger review_mode must be pull_request, uncommitted, or branch." }
 Assert-Text $ledger.repository.id 'repository.id'
 Assert-Text $ledger.repository.name 'repository.name'
+$provider = [string]$ledger.repository.provider
+if ($provider -and $provider -notin @('azure_devops', 'github', 'unknown', 'local')) { throw 'Invalid repository.provider.' }
+if ($provider -in @('github', 'azure_devops')) { Assert-Text $ledger.repository.host 'repository.host' }
 if ($reviewMode -eq 'pull_request') {
+    if ($provider -and $provider -notin @('azure_devops', 'github')) { throw 'PR review requires a supported repository.provider.' }
+    if ($provider -eq 'github') { Assert-Text $ledger.repository.owner 'repository.owner' }
     Assert-Text $ledger.repository.url 'repository.url'
-    if ([string]::IsNullOrWhiteSpace([string]$ledger.repository.project_id) -and [string]::IsNullOrWhiteSpace([string]$ledger.repository.project_name)) {
+    if ($provider -ne 'github' -and [string]::IsNullOrWhiteSpace([string]$ledger.repository.project_id) -and [string]::IsNullOrWhiteSpace([string]$ledger.repository.project_name)) {
         throw 'At least one of repository.project_id or repository.project_name is required.'
     }
 }
@@ -85,8 +90,13 @@ if ($reviewMode -eq 'uncommitted') {
 } elseif (-not [string]::Equals([string]$ledger.pull_request.source_ref, $expectedSource, [System.StringComparison]::Ordinal)) {
     throw "Branch guard failed in ledger: source_ref '$($ledger.pull_request.source_ref)' does not equal '$expectedSource'."
 }
-if ($reviewMode -eq 'branch' -and [string]$ledger.pull_request.target_ref -notmatch '^(?:refs/heads/|refs/remotes/origin/|origin/)?(?:main|master)$') {
-    throw "Branch review target_ref must identify main or master."
+if ($reviewMode -eq 'branch') {
+    $baseRef = [string]$ledger.pull_request.target_ref
+    # Older schemas also allowed bare main/master or origin/main/master.
+    if ($baseRef -match '^(?:origin/)?(?:main|master)$') { $baseRef = 'refs/heads/' + ($baseRef -replace '^origin/', '') }
+    if ($baseRef -notmatch '^refs/(heads|remotes)/') { throw 'Branch review target_ref must identify a valid default branch ref.' }
+    & git check-ref-format $baseRef 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'Branch review target_ref must identify a valid default branch ref.' }
 }
 
 if ($reviewMode -ne 'pull_request' -and -not [string]::Equals([string]$ledger.pull_request.source_commit, [string]$ledger.local.head_commit, [System.StringComparison]::OrdinalIgnoreCase)) {

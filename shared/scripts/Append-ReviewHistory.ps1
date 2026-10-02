@@ -129,6 +129,15 @@ if (-not [string]::Equals([string]$ledger.repository.url, [string]$runContext.re
     throw 'Ledger and run context disagree on repository.url.'
 }
 
+foreach ($field in @('provider', 'host', 'owner')) {
+    $ledgerValue = [string]$ledger.repository.$field
+    $contextValue = [string]$runContext.repository.$field
+    if (($ledgerValue -or $contextValue) -and $ledgerValue -ne $contextValue) { throw "Ledger and run context disagree on repository.$field." }
+}
+foreach ($field in @('source_repository', 'target_repository', 'url')) {
+    if ([string]$ledger.pull_request.$field -ne [string]$runContext.pull_request.$field) { throw "Ledger and run context disagree on pull_request.$field." }
+}
+
 if ([string]$ledger.review_mode -eq 'pull_request') {
     if ([string]::IsNullOrWhiteSpace([string]$ledger.pull_request.id) -or [string]$ledger.pull_request.id -ne [string]$runContext.pull_request.id) {
         throw 'Ledger and run context disagree on pull_request.id.'

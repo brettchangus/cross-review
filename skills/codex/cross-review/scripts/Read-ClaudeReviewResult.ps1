@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory)][string]$TranscriptPath,
     [Parameter(Mandatory)][string]$OutputPath,
+    [ValidateSet('low', 'medium', 'high', 'xhigh')][string]$ExpectedEffort = 'medium',
     [switch]$RequireNativeReview
 )
 
@@ -14,7 +15,7 @@ foreach ($line in [IO.File]::ReadLines((Resolve-Path -LiteralPath $TranscriptPat
     $event = $line | ConvertFrom-Json
     foreach ($block in $event.message.content) {
         if ($block.type -eq 'tool_use' -and $block.name -eq 'Skill' -and
-            $block.input.skill -eq 'code-review' -and [string]$block.input.args -match '^high(?:\s|$)') {
+            $block.input.skill -eq 'code-review' -and [string]$block.input.args -match ('^{0}(?:\s|$)' -f [regex]::Escape($ExpectedEffort))) {
             $nativeCalls[[string]$block.id] = $true
         }
         if ($block.type -eq 'tool_result' -and $nativeCalls.ContainsKey([string]$block.tool_use_id) -and -not $block.is_error) {
@@ -30,7 +31,7 @@ if ($null -eq $result -or $result.subtype -ne 'success' -or $result.is_error -or
     throw 'Claude did not return a successful, non-empty final report.'
 }
 $permissionDenials = if ($null -eq $result.permission_denials) { @() } else { @($result.permission_denials) }
-if ($RequireNativeReview -and -not $nativeCompleted) { throw 'No successful native code-review high invocation was observed; refusing a generic review.' }
+if ($RequireNativeReview -and -not $nativeCompleted) { throw "No successful native code-review $ExpectedEffort invocation was observed; refusing a generic review." }
 [IO.File]::WriteAllText($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath), [string]$result.result, [Text.UTF8Encoding]::new($false))
 [ordered]@{
     report_path = $OutputPath

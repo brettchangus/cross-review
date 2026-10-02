@@ -21,6 +21,7 @@ Every run writes into its own folder under `.reviews/runs/`. Only the history fi
       run-context.json
       claude-review.md
       codex-independent.md
+      pr-comments.json             PR mode only: point-in-time discussion snapshot
       codex-evaluation.md       Claude-led comparison
       claude-evaluation.md      Codex-led comparison
       adjudication.json
@@ -39,6 +40,18 @@ The scope comes first, so all runs of one PR or branch list together, oldest to 
 
 Never delete, move, or overwrite a run folder, including one left by a failed run. Artifacts that earlier versions of this workflow wrote directly into `.reviews/` or `.reviews/codex-led/` are left as they are; never write to or remove them.
 
+For PR mode, `pr-comments.json` records the validated PR ID, capture time, fetch source, and non-deleted text comment threads with replies, status, and file/line and iteration context. Capture it after both independent reviews and before comparison. For non-PR modes, omit it. The comparison and final adjudicator may match comments to model findings and verify comment-only concerns, but comment-only concerns remain outside `findings`, `groups`, and effectiveness metrics. In the report, show verified comment-only issues under `Existing PR discussion` with thread ID, status, and source evidence; identify model findings already raised in a thread. Do not infer that a resolved status proves the code is fixed.
+
+## Provider identity and compatibility
+
+Schemas 3 and 4 retain their existing roles. Provider fields are additive: older artifacts with no provider remain valid. New run-context and adjudication repository objects both include `provider` (`azure_devops`, `github`, `unknown`, `local`) and `host` (empty for no remote or local filesystem remotes). Supported provider hosts must be non-empty. GitHub additionally requires `owner`; `name` is the repository name, URL is the sanitized web URL, and ID is `github://<host>/<lowercase-owner>/<lowercase-repo>` in every mode. Azure IDs and project fields retain their existing values; Azure PR ledgers still require project ID or name. GitHub PRs do not require Azure project fields.
+
+In PR mode, copy `pull_request.url`, `source_repository`, and `target_repository` identically into context and adjudication when supplied by the adapter. GitHub PR number is the positive repository-scoped number, not a GraphQL node ID. History validates provider/host/owner and these PR identity fields when present, preventing mismatched reports. Do not rewrite older histories or change Azure identity formats. Show provider and host in every preflight and final report independently of metadata transport.
+
+Branch targets may name any valid `refs/heads/*` or `refs/remotes/*` default branch, determined by `Resolve-ReviewBase.ps1`; main/master are only local fallbacks. The ledger validator checks ref syntax rather than restricting branch names.
+
+Discussion snapshots keep schema 1 with additive provider/host and capability fields. GitHub snapshots include conversation comments, submitted review summaries, inline review threads/replies, resolved/outdated flags, current/original locations, URLs, and commit context. IDs may be strings. Missing capability is unknown, never an inferred status. A capture is complete only after all connections and nested replies are paginated; errors cannot produce an empty snapshot. Azure retains its status and iteration context. See [provider-workflow.md](provider-workflow.md) for raw payload contracts.
+
 ## run-context.json
 
 Schema version 3. Splice the estimator's own `review_size` and `estimate` objects in verbatim rather than retyping their fields.
@@ -53,7 +66,7 @@ Schema version 3. Splice the estimator's own `review_size` and `estimate` object
   "started_at": "2026-09-09T20:00:00.0000000Z",
   "started_at_unix_ms": 1788984000000,
   "run_directory": ".reviews/runs/pr-1234_20260909T200000Z_claude-led_9d2c7f15",
-  "repository": { "id": "repository-guid", "name": "example-repo", "url": "https://dev.azure.com/org/project/_git/example-repo" },
+  "repository": { "id": "repository-guid", "name": "example-repo", "url": "https://dev.azure.com/org/project/_git/example-repo", "provider": "azure_devops", "host": "dev.azure.com" },
   "pull_request": {
     "id": 1234,
     "source_ref": "refs/heads/feature/example",
@@ -67,11 +80,11 @@ Schema version 3. Splice the estimator's own `review_size` and `estimate` object
     "claude_review": "native_code_review",
     "codex_review": "native_codex_exec_review",
     "claude_model": "claude-opus-4-7",
-    "claude_effort": "high",
+    "claude_effort": "medium",
     "claude_model_source": "session_context",
     "claude_effort_source": "explicit",
     "codex_model": "gpt-5.6-sol",
-    "codex_reasoning_effort": "high",
+    "codex_reasoning_effort": "medium",
     "codex_model_source": "codex_doctor",
     "codex_reasoning_effort_source": "explicit",
     "codex_comparison_model": "gpt-5.6-sol",
@@ -88,11 +101,11 @@ Schema version 3. Splice the estimator's own `review_size` and `estimate` object
 
 `invoked_at` is when the command began; `started_at` is captured immediately after approval and is the start used for duration, so user decision time never trains estimates. Unix milliseconds are authoritative; the ISO text is for readability.
 
-`pr_metadata` is one of `azure_devops_mcp`, `azure_cli_fallback`, `azure_devops_mcp_no_match`, `azure_cli_fallback_no_match`, `not_queried`, `not_applicable_no_origin`, or `not_applicable_non_azure_origin`.
+`pr_metadata` retains existing Azure values and additionally accepts `github_mcp`, `github_cli`, `github_mcp_no_match`, `github_cli_no_match`, and `not_applicable_unknown_provider`. Keep `tooling.pr_metadata_transport` (`mcp` or `cli`, null when not queried) separate from repository provider. The legacy `not_applicable_non_azure_origin` is read-compatible but is not used for GitHub.
 
 Model and effort values are nullable, because not every CLI exposes an exact effective default before invocation. Their `_source` fields are `session_context`, `explicit`, `codex_doctor`, `cli_default_unresolved`, or `unavailable`. Store JSON `null` when a value is unresolved and render a fallback such as `CLI default (exact model unresolved)` in human-readable output only. Never store that label as if it were an identifier.
 
-The existing `codex_model`, `codex_reasoning_effort`, and their source fields describe the independent review. Record the comparison separately in `codex_comparison_model`, `codex_comparison_model_source`, `codex_comparison_reasoning_effort`, and `codex_comparison_reasoning_effort_source`. Copy the independent review's model and model source into the comparison model fields; the independent review's effort is always `high` and the comparison effort is always `medium`, both with source `explicit`. Report both stages' settings in the final report. The history writer preserves these fields through the run context's `tooling` object; older history entries without comparison fields remain valid.
+The existing `codex_model`, `codex_reasoning_effort`, and their source fields describe the independent review. Record the comparison separately in `codex_comparison_model`, `codex_comparison_model_source`, `codex_comparison_reasoning_effort`, and `codex_comparison_reasoning_effort_source`. Copy the independent review's model and model source into the comparison model fields; use the same selected effort (`low`, `medium`, `high`, or `xhigh`, default `medium`) for both stages, with source `explicit`. Report both stages' settings in the final report. The history writer preserves these fields through the run context's `tooling` object; older history entries without comparison fields remain valid.
 
 ## Finding IDs and severity
 
@@ -114,6 +127,8 @@ Normalize each initial severity to `high`, `medium`, or `low`. Map `critical` or
   "review_mode": "pull_request",
   "status": "complete",
   "repository": {
+    "provider": "azure_devops",
+    "host": "dev.azure.com",
     "id": "repository-guid",
     "name": "example-repo",
     "url": "https://dev.azure.com/org/project/_git/example-repo",
@@ -156,7 +171,7 @@ Normalize each initial severity to `high`, `medium`, or `low`. Map `critical` or
 }
 ```
 
-Repository ID and name, local branch and HEAD, and the source/target refs and commits are always required and non-empty. `pull_request` mode additionally requires the repository URL, project identity, and a positive `pull_request.id`; the other modes set that ID to `null`. A non-PR repository with no remote uses an empty URL.
+Repository ID and name, local branch and HEAD, and the source/target refs and commits are always required and non-empty. `pull_request` mode additionally requires the repository URL, provider-specific identity, and a positive `pull_request.id`; the other modes set that ID to `null`. A non-PR repository with no remote uses an empty URL.
 
 The `pull_request` object is the scope container in every mode:
 
@@ -164,7 +179,7 @@ The `pull_request` object is the scope container in every mode:
 | --- | --- | --- | --- |
 | `pull_request` | positive integer | fetched PR source ref/commit | fetched PR target ref/commit |
 | `uncommitted` | `null` | `WORKTREE` at local HEAD | `HEAD` at the same commit |
-| `branch` | `null` | current branch at local HEAD | resolved `main` or `master` ref/commit |
+| `branch` | `null` | current branch at local HEAD | resolved default branch ref/commit |
 
 Rules the calculator enforces:
 
@@ -220,7 +235,7 @@ Codex-led run folders use the `codex-led` variant under the shared `.reviews/run
 
 ### Tooling
 
-In the version-4 run context, keep `pr_metadata`, `claude_review`, `codex_review`, and the independent reviewers' model/effort fields above. Set `claude_model_source: explicit` when a discovered model or alias was supplied to the child; otherwise use null model and `cli_default_unresolved`. A supplied alias is recorded verbatim, without guessing its resolved version. Claude's independent effort remains `high` with source `explicit`. Add:
+In the version-4 run context, keep `pr_metadata`, `claude_review`, `codex_review`, and the independent reviewers' model/effort fields above. Set `claude_model_source: explicit` when a discovered model or alias was supplied to the child; otherwise use null model and `cli_default_unresolved`. A supplied alias is recorded verbatim, without guessing its resolved version. Claude's independent effort uses the selected effort with source `explicit`. Add:
 
 ```json
 {
@@ -237,7 +252,7 @@ In the version-4 run context, keep `pr_metadata`, `claude_review`, `codex_review
 }
 ```
 
-These are fields inside `tooling`, not another top-level object. Omit the version-3 `codex_comparison_*` fields: Codex is not running that comparison. If the current Codex session exposes its model/effort, record them with `session_context`; do not use Codex CLI diagnostics as a proxy for this session. An explicit Claude model is passed unchanged to both Claude stages. Native review subagents can use other models; do not infer the main session model from a multi-model usage breakdown. Preserve the honest preflight labels in the final report.
+These are fields inside `tooling`, not another top-level object. Set `claude_comparison_effort` to the same selected effort as both independent reviews. Omit the version-3 `codex_comparison_*` fields: Codex is not running that comparison. If the current Codex session exposes its model/effort, record them with `session_context`; do not use Codex CLI diagnostics as a proxy for this session. The skill's effort argument does not change the active adjudicator session. An explicit Claude model is passed unchanged to both Claude stages. Native review subagents can use other models; do not infer the main session model from a multi-model usage breakdown. Preserve the honest preflight labels in the final report.
 
 ### Adjudication
 

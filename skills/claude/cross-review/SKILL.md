@@ -1,37 +1,38 @@
 ---
 name: cross-review
-description: Cross-validates an explicit or discovered Azure DevOps pull request, uncommitted changes, or a branch diff with Claude's native /code-review and Codex's native review, then records effectiveness metrics. Use when the user invokes /cross-review or asks for a two-model code review.
-argument-hint: "[pr <pull-request-id>]"
+description: Cross-validates an explicit or discovered Azure DevOps or GitHub pull request, uncommitted changes, or a branch diff with Claude's native /code-review and Codex's native review, then records effectiveness metrics. Use when the user invokes /cross-review or asks for a two-model code review.
+argument-hint: "[--effort low|medium|high|xhigh] [pr <number-or-GitHub-URL>]"
 ---
 
 # Cross-review
 
-Run a read-only, two-model review of the highest-precedence eligible change scope. Do not modify source code, PR state, or Azure DevOps comments.
+Run a read-only, two-model review of the highest-precedence eligible change scope. Do not modify source code, PR state, or PR comments.
 
 Accept either:
 
 - `/cross-review`
-- `/cross-review pr <pull-request-id>`
+- `/cross-review pr <number-or-GitHub-URL>`
+- `/cross-review --effort <low|medium|high|xhigh> [pr <number-or-GitHub-URL>]`
 
 Use [prompts/codex-evaluate.md](prompts/codex-evaluate.md) for the Codex comparison pass.
 
 ## Invariants
 
-- Select exactly one scope in this order: explicit PR; uncommitted changes; discovered PR for the current branch; current branch against the repository's `main` or `master` default branch; nothing to review.
+- Select exactly one scope in this order: explicit PR; uncommitted changes; discovered PR for the current branch; current branch against the repository's actual default branch; nothing to review.
 - An explicit PR takes precedence over local uncommitted changes.
 - Every review reads one workspace, and it must hold exactly the source commit recorded during preflight. For PR and branch mode, review the original checkout when it already holds that commit with a clean tree; otherwise isolate the commit in a detached Git worktree. Uncommitted mode always reviews the original checkout.
 - When a worktree is created, switch the whole session into it with `EnterWorktree`. A shell `Set-Location` moves only that shell, and `/code-review` subagents start in the session's working directory.
 - Once a review worktree exists, every exit path removes it: success, a failed stage, or any stop. After `EnterWorktree` succeeds, return the session with `ExitWorktree` using `action: "keep"`, then run `scripts/Remove-ReviewWorkspace.ps1` for that exact path and report any warning it returns. A run that created no worktree skips all of this.
 - For automatic selection, uncommitted changes include staged, unstaged, and untracked files, excluding `.reviews/**` bookkeeping.
-- Use Azure DevOps MCP first whenever PR metadata lookup is required. Fall back to Azure CLI only when MCP is unavailable, disconnected, lacks the operation, errors, or omits required metadata.
+- Use the detected provider's MCP first for PR metadata. Fall back to Azure CLI or GitHub CLI only for an unavailable/deficient MCP operation; disclose the reason. Follow [references/provider-workflow.md](references/provider-workflow.md).
 - A branch, repository, project, status, or multiple-match safety failure is not an MCP failure. Stop; do not use CLI to bypass it.
-- For every PR review, `sourceRefName` must exactly equal `refs/heads/<current-local-branch>`, and the PR repository/project must match the local Azure DevOps `origin` identity.
-- Use the PR's actual target branch as its review base. For a non-PR branch comparison, use the repository default branch when it resolves to `main` or `master`; otherwise prefer an existing `main`, then `master`. Freeze the base at the target commit recorded during preflight: both reviewers receive that commit ID, never a mutable ref name such as `origin/main`.
+- For every PR review, source ref must match the exact current local branch. Validate target and source repository identities against local remotes, including forks. Never bypass branch/repository/PR-state/ambiguity guards through fallback.
+- Use the PR's actual target branch as its review base. For a non-PR branch comparison, resolve and refresh the actual repository default branch with `scripts/Resolve-ReviewBase.ps1`. Freeze the base at the target commit recorded during preflight: both reviewers receive that commit ID, never a mutable ref name such as `origin/main`.
 - Preserve the independence of both initial reviews. Start Codex's review before Claude's review exists, and never reveal Claude's findings to it before its own review is complete.
 - Retain the background task ID returned when Codex's independent review starts as `codex_review_task_id`, and clear it once that review completes. While it is set, every stop path calls `TaskStop` with it before deleting temporary run data or a review worktree, so nothing is removed out from under a live process and no orphaned review keeps burning tokens. Then clean up as usual: `Remove-ReviewWorkspace.ps1` already reports whatever it could not remove.
 - Invoke Claude's native `/code-review` and Codex's native `codex exec review`. Do not silently replace either with a generic review prompt.
-- Always pass `/code-review` the explicit level `high`. Without a level it reuses the level typed in an earlier invocation, which makes the run unreproducible and the recorded effort wrong.
-- Always pin Codex's independent review to the explicit reasoning effort `high`. Without it the review inherits the CLI's configured `model_reasoning_effort`, which diagnostics cannot read back, so the run is likewise unreproducible and the recorded reasoning wrong.
+- Always pass `/code-review` the selected effort level. Without a level it reuses the level typed in an earlier invocation, which makes the run unreproducible and the recorded effort wrong.
+- Always pin Codex's independent review and comparison to the selected reasoning effort. Without it they inherit the CLI's configured `model_reasoning_effort`, which diagnostics cannot read back, so the run is likewise unreproducible and the recorded reasoning wrong.
 - Run both Codex stages with `--sandbox read-only --ephemeral`. Do not use approval bypasses, writable sandboxes, or persistent Codex sessions.
 - Report the effective review model and effort/reasoning level when they can be resolved without invoking a reviewer. Label unresolved defaults honestly; never guess from a model catalog.
 - Display the complete preflight inside the interactive confirmation question before any reviewer, worktree, `.reviews` write, Git exclusion change, or history write. Only `y` or `yes` continues; all other outcomes quit.
@@ -44,14 +45,16 @@ Use [prompts/codex-evaluate.md](prompts/codex-evaluate.md) for the Codex compari
 
 Retain the current UTC timestamp as `invoked_at` and Unix epoch milliseconds as `invoked_at_unix_ms`; do not use them as the timed review start.
 
-Parse an optional `pr <positive-integer>`. It may occur at most once. Reject unknown tokens, duplicates, missing IDs, and non-positive or non-integer IDs before lookup.
+Parse optional `pr <positive-integer-or-GitHub-URL>` and `--effort <low|medium|high|xhigh>` in either order with `scripts/Resolve-ReviewArguments.ps1 -ReviewArguments <tokens>`. Retain its `effort` as `<selected-effort>` throughout the run; omitted effort defaults to `medium`. The parser rejects unknown tokens, duplicates, missing values, and invalid IDs before lookup. The argument controls the independent reviewers and comparison process; the already-running Claude session's adjudication effort is controlled by that session and cannot be changed by this skill argument.
 
 Resolve the repository root, exact current branch, local HEAD, optional origin URL, and stable repository identity, and detect local changes. Issue both commands in a single tool call: neither depends on the other, and every extra round trip here is time the user waits before the confirmation prompt.
 
 ```powershell
-& "${CLAUDE_SKILL_DIR}/scripts/Resolve-AdoPr.ps1" -LocalOnly
+& "${CLAUDE_SKILL_DIR}/scripts/Resolve-ReviewPr.ps1" -LocalOnly
 git -C (git rev-parse --show-toplevel) status --porcelain=v1 --untracked-files=all -- . ':(exclude).reviews/**'
 ```
+
+When the parser returns `pr_url`, pass `-PrUrl <url>` to the local identity and PR resolution calls.
 
 The first operation reports `operation: local_identity` and must work for Azure DevOps origins, other Git providers, and repositories with no remote. Stop for detached HEAD. Use provider repository identity for PRs; for non-PR scopes use the normalized origin identity when available or the root-commit fingerprint returned for a no-remote repository. A repository URL may be empty only for a non-PR scope with no remote.
 
@@ -67,37 +70,19 @@ If `pr <id>` was supplied, resolve it immediately even when the working tree is 
 
 ### B. Uncommitted changes
 
-When no PR ID was supplied and staged, unstaged, or untracked files exist outside `.reviews/**`, select `review_mode: uncommitted` without querying Azure DevOps.
+When no PR ID was supplied and staged, unstaged, or untracked files exist outside `.reviews/**`, select `review_mode: uncommitted` without querying the provider.
 
 Use pull-request ID `null`, source ref `WORKTREE`, target ref `HEAD`, and the retained local HEAD as both source and target commit identifiers.
 
 ### C. PR discovered for the branch
 
-When no explicit PR and no uncommitted changes exist and `origin` identifies an Azure DevOps repository, query for exactly one active PR whose source is the current branch using **Resolve PR metadata**. A zero-result lookup is not an error in this automatic path; continue to branch comparison. Multiple matches or a safety mismatch still stop the workflow.
-
-If no origin is configured or origin is not Azure DevOps, report that Azure DevOps PR discovery is not applicable and continue to branch comparison. Do not require Azure DevOps merely to discover that a local non-PR scope is eligible.
+When no explicit PR and no local changes exist, discover a PR for supported Azure DevOps/GitHub providers using **Resolve PR metadata**. Validate exact source repository/branch and complete pagination. Zero matches proceeds to branch comparison; multiple matches or safety mismatches stop. Skip provider lookup for unknown/no-remote repositories.
 
 If one valid PR exists, select `review_mode: pull_request`.
 
 ### D. Branch comparison
 
-When no PR exists, stop with “nothing to review” if the current branch is named `main` or `master`.
-
-Otherwise resolve the base in this order:
-
-1. `refs/remotes/origin/HEAD` when it points to `origin/main` or `origin/master`
-2. existing `origin/main`
-3. existing `origin/master`
-4. existing local `main`
-5. existing local `master`
-
-Refresh a remote base before measuring:
-
-```powershell
-git fetch --no-tags origin +refs/heads/<main-or-master>:refs/remotes/origin/<main-or-master>
-```
-
-Stop clearly if no `main` or `master` base can be resolved. Select `review_mode: branch`, with the current branch/HEAD as source and the selected default branch/ref commit as target. If the committed diff contains no changed files after excluding `.reviews/**`, finish with “nothing to review.”
+Run `scripts/Resolve-ReviewBase.ps1` for the selected remote, as described in [references/provider-workflow.md](references/provider-workflow.md). It resolves and refreshes the actual default branch, including names other than main/master. If `is_default_branch` is true, report nothing to review. Otherwise select mode `branch`, current branch/HEAD as source and the returned default ref/commit as target. Stop clearly if no base resolves or a remote operation fails. If no committed changes remain, finish without artifacts or history.
 
 ### E. Nothing to review
 
@@ -111,59 +96,25 @@ Do not create artifacts or history.
 
 ## Resolve PR metadata
 
-Derive Azure DevOps organization, project, and repository from `origin`. Use the Azure DevOps MCP pull-request operation first:
+Read and follow [references/provider-workflow.md](references/provider-workflow.md). It defines provider detection, tracking/origin/upstream selection, guarded MCP-first resolution, CLI fallback, complete pagination, fork validation, and metadata/commit consistency.
 
-- explicit PR: get that PR, scoped to the local organization/repository when supported
-- automatic discovery: list active PRs scoped to local project/repository and `sourceRefName: refs/heads/<current-local-branch>`; when exactly one candidate is returned, always get the full PR record by ID
+Normalize complete provider get metadata through `scripts/Resolve-ReviewPr.ps1 -MetadataPath <temporary-raw-json>`. For CLI fallback, use `-PullRequestId <id>` or `-AllowNoMatch`. Pass the requested ID when explicit and retain parsed `-PrUrl <url>` on every applicable call. An identity, state, or ambiguity mismatch stops; never use fallback to bypass it.
 
-Treat an MCP list result as discovery data only, even when it appears complete. Validate the full get result. If the get operation is unavailable, errors, or still omits required data, that is a qualifying MCP failure and Azure CLI fallback is allowed.
+Save the normalized result outside the repository and run `scripts/Get-ReviewPrScope.ps1 -ContextPath <normalized-context-json>`. Use its returned frozen source/target commits for both estimation and review. On a moved-PR error, refresh metadata through the same access method and retry up to twice, then stop if unstable. Neither reviewer receives the PR number. Delete temporary raw/normalized context files on all cleanup/cancellation paths.
 
-Save the full MCP get record as raw JSON outside the repository and normalize it through:
-
-```powershell
-& "${CLAUDE_SKILL_DIR}/scripts/Resolve-AdoPr.ps1" -MetadataPath <temporary-mcp-metadata-json>
-```
-
-Delete the temporary metadata file after validation. Report `PR metadata: Using Azure DevOps MCP.`
-
-Do not manually trim, synthesize, or translate MCP metadata. The resolver deterministically accepts the Azure DevOps pull-request status enum as either its textual names or numeric values (`notSet`/`0`, `active`/`1`, `abandoned`/`2`, `completed`/`3`, `all`/`4`) and returns the canonical text form.
-
-Only for a qualifying MCP failure, report the reason and try Azure CLI:
-
-```powershell
-# Explicit PR
-& "${CLAUDE_SKILL_DIR}/scripts/Resolve-AdoPr.ps1" -PullRequestId <id>
-
-# Automatic lookup; found:false means continue to branch comparison
-& "${CLAUDE_SKILL_DIR}/scripts/Resolve-AdoPr.ps1" -AllowNoMatch
-```
-
-Report `PR metadata: Using Azure CLI fallback.` after CLI success. If MCP successfully returns zero automatic matches, do not repeat the lookup through CLI.
-
-For a selected PR, validate active status, positive ID, source/target refs, repository/project identity, repository URL, and source commit. Fetch both refs explicitly:
-
-```powershell
-git fetch --no-tags origin +<source-ref>:refs/remotes/origin/<source-branch>
-git fetch --no-tags origin +<target-ref>:refs/remotes/origin/<target-branch>
-```
-
-Keep the leading `+` on every refspec. PR source branches are routinely rebased or force-pushed, and Git rejects a non-forced refspec update as non-fast-forward. This is the same forced remote-tracking update that a plain `git fetch` applies.
-
-Use the fetched commits as authoritative PR scope identifiers. Do not require local HEAD to equal the remote PR source commit; the review worktree reviews the exact remote source.
-
-The resolver strips URL user information, query strings, and fragments before any remote URL is displayed, returned, or persisted. Never reconstruct, log, or store the unsanitized origin URL.
+Copy detected provider/host and GitHub owner into repository identity in run context and adjudication; include PR URL and source/target repositories in both scope objects. Show provider/host in the final report. Keep metadata transport separate, following the artifact contract.
 
 ## 3. Measure, estimate, and report preflight
 
-For PR mode, measure the fetched source and target refs directly. For uncommitted or branch mode, invoke the estimator from the resolved repository root; the estimator itself also anchors paths there. Do not create a worktree while measuring: the detached PR or branch worktree is created only after explicit confirmation.
+For PR mode, measure the frozen source and target commit IDs returned by the scope helper. For uncommitted or branch mode, invoke the estimator from the resolved repository root; the estimator itself also anchors paths there. Do not create a worktree while measuring: the detached PR or branch worktree is created only after explicit confirmation.
 
 Issue the two preflight commands below in a single tool call. Neither depends on the other, and this is the last stretch the user waits through before being asked to confirm.
 
 ```powershell
 & "${CLAUDE_SKILL_DIR}/scripts/Get-ReviewEstimate.ps1" `
   -ReviewMode <pull_request|uncommitted|branch> `
-  -BaseRef <remote-target-ref|HEAD|default-branch-ref> `
-  -HeadRef <remote-source-ref|HEAD> `
+  -BaseRef <frozen-target-commit|HEAD> `
+  -HeadRef <frozen-source-commit|HEAD> `
   -HistoryPath (Join-Path <original-repository-root> '.reviews/history.jsonl') `
   -GlobalHistoryPath (Join-Path $env:USERPROFILE '.claude/cross-review/history.jsonl') `
   -RepositoryId <verified-or-local-repository-id> `
@@ -171,18 +122,18 @@ Issue the two preflight commands below in a single tool call. Neither depends on
 
 & "${CLAUDE_SKILL_DIR}/scripts/Get-ReviewModelInfo.ps1" `
   [-ClaudeModel <session-Claude-model>] `
-  -ClaudeEffort high `
+  -ClaudeEffort <selected-effort> `
   -ClaudeEffortSource explicit `
-  -CodexReasoningEffort high
+  -CodexReasoningEffort <selected-effort>
 ```
 
 The estimator uses history only from the same review mode, then applies comparable-size and repository preferences. If `review_size.has_changes` is false, finish with nothing to review.
 
 Retain the estimator's `base_commit` and `head_commit`. These are the preflight's target and source commits. In PR and branch mode, every later step uses these commit IDs rather than ref names, so a fetch cannot move the base and a detached worktree at `head_commit` prevents the source from changing after approval.
 
-Claude's native review always runs at the explicit `/code-review` level `high`, so the helper reports that level with source `explicit`. For the Claude model, use the current Claude Code session model ID when it is exposed to this invocation, and pass `-ClaudeModel` only when it is known. Do not infer it from settings because `/model` may have changed it during the session.
+Claude's native review runs at the explicit `/code-review` level `<selected-effort>`, so the helper reports that level with source `explicit`. For the Claude model, use the current Claude Code session model ID when it is exposed to this invocation, and pass `-ClaudeModel` only when it is known. Do not infer it from settings because `/model` may have changed it during the session.
 
-Codex's independent review always runs at the explicit reasoning effort `high`, passed as `-CodexReasoningEffort high` above and then to the review invocation itself, so the helper reports it with source `explicit`. This mirrors the pinned `/code-review` level on Claude's side and for the same reason: `codex doctor --json` exposes the effective model but not the effective reasoning effort, so an unpinned run would inherit whatever `model_reasoning_effort` happens to sit in the user's `config.toml` and be recorded as an unresolved CLI default. Pinning both reviewers keeps the two sides comparable and the run reproducible.
+Codex's independent review runs at the explicit reasoning effort `<selected-effort>`, passed to the review invocation itself, so the helper reports it with source `explicit`. `codex doctor --json` exposes the effective model but not the effective reasoning effort, so an unpinned run would inherit whatever `model_reasoning_effort` happens to sit in the user's `config.toml` and be recorded as an unresolved CLI default. Pinning both reviewers and the comparison keeps the run reproducible. The same level name does not imply identical reasoning across providers. If a provider reports a cap or fallback, disclose the effective level rather than claiming the request was honored.
 
 The helper uses read-only `codex doctor --json` diagnostics for the Codex *model*. It does not invoke either review model. An explicit Codex configuration is reported exactly; `<default>` remains unresolved. Continue the normal tool-availability preflight if model detection is partial or unavailable.
 
@@ -191,17 +142,19 @@ Build the following complete preflight block. Do not leave it only in tool outpu
 ```text
 Cross-review preflight
 Review scope: Pull request | Uncommitted changes | Branch comparison
+Repository provider: <GitHub | Azure DevOps | Unknown> (<detected host>) | Local Git (no remote)
 Branch: <local branch>
 PR: #<id> — <title> | None
-Repository: <project/repository or repository>
-Source: <source ref> @ <source commit>
-Target: <target ref> @ <target commit>
+Repository: <host/owner/repo or organization/project/repo>
+Source: <source repository when fork> <source ref> @ <source commit>
+Target: <target repository when fork> <target ref> @ <target commit>
 
 Tools:
-  PR metadata: Azure DevOps MCP | Azure CLI fallback | Azure DevOps MCP (no branch PR) | Azure CLI fallback (no branch PR) | Not queried (uncommitted changes took precedence) | Not applicable (no Azure DevOps origin)
+  PR metadata: <provider MCP | provider CLI (fallback reason) | no branch PR | skipped by precedence | unsupported provider/no remote>
   Claude: native /code-review (<scope>) — <model ID or exact model unavailable>, effort <level or unavailable>
-  Codex review: native codex exec review (<scope>) — <model ID or CLI default unresolved>, reasoning high (explicit)
-  Codex comparison: native codex exec — <same model label>, reasoning medium (explicit)
+  Codex review: native codex exec review (<scope>) — <model ID or CLI default unresolved>, reasoning <selected-effort> (explicit)
+  Codex comparison: native codex exec — <same model label>, reasoning <selected-effort> (explicit)
+  Claude final adjudicator: this session — <model and effort or unavailable; independent of --effort>
 
 Workspace: This checkout (already at the reviewed commit) | Detached worktree at <head commit>
 Review size: <band> — <files> files, +<added>/-<deleted> lines, <commits> commits, <binary> binary files[, <oversized> oversized untracked files estimated]
@@ -209,7 +162,7 @@ Estimated time: <central human-readable duration> (<low>-<high>)
 Estimate basis: <method>, <sample count> completed same-mode historical runs, <confidence> confidence
 ```
 
-For branch mode after a zero-result lookup, name the metadata tool used and state that no branch PR was found. For uncommitted mode, state that PR lookup was skipped by precedence. For a branch review with no Azure DevOps origin, state why discovery was not applicable.
+For branch mode after a zero-result lookup, name the metadata tool used and state that no branch PR was found. For uncommitted mode, state that PR lookup was skipped by precedence. For unknown/no-remote repositories, state why discovery was not applicable. Always show provider/host independently of metadata access, including uncommitted and branch modes; use Unknown (local remote) when no host is available.
 
 Call Claude Code's `AskUserQuestion` with exactly one question. Put the entire completed preflight block directly in the question text, followed by a blank line and `Continue with this cross-review?`. This is the authoritative preflight display for an actual run. Do not rely on assistant prose emitted before the tool call: Claude Code may buffer that prose and show the interactive question first. Do not shorten the block to a one-line summary, say that the review is starting, or invoke any setup command before the answer.
 
@@ -281,7 +234,7 @@ $invocation = & "${CLAUDE_SKILL_DIR}/scripts/New-CodexReviewInvocation.ps1" `
   [-BaseCommit <target-commit>] `
   -OutputPath <temporary-run-directory>/codex-independent.md `
   [-Model <resolved-model>] `
-  -ReasoningEffort high | ConvertFrom-Json
+  -ReasoningEffort <selected-effort> | ConvertFrom-Json
 
 $codexArguments = @($invocation.arguments | ForEach-Object { [string]$_ })
 & ([string]$invocation.executable) @codexArguments
@@ -289,11 +242,11 @@ $codexArguments = @($invocation.arguments | ForEach-Object { [string]$_ })
 
 Run it with the shell tool's background option so the session continues immediately, and retain the returned background task ID as `codex_review_task_id`. Then invoke the installed native `/code-review` with the selected scope:
 
-- PR: the workspace's `HEAD` against the recorded `<target-commit>`. This is the same `target...source` scope Codex receives through `--base <target-commit>`. Do not pass `pr <id>`: `/code-review` resolves PR numbers through its own provider integration rather than Azure DevOps, so it could fail or review a different change.
+- PR: the workspace's `HEAD` against the recorded `<target-commit>`. This is the same `target...source` scope Codex receives through `--base <target-commit>`. Do not pass `pr <id>`: `/code-review` resolves PR numbers through its own provider integration rather than the validated frozen scope, so it could fail or review a different change.
 - uncommitted: staged, unstaged, and untracked changes outside `.reviews/**` against `HEAD`, invoked from the repository root
-- branch: the workspace's `HEAD` against the recorded `<target-commit>` of the resolved `main` or `master` base
+- branch: the workspace's `HEAD` against the recorded `<target-commit>` of the resolved default branch
 
-Pass the scope and the level `high` explicitly when invoking the native skill.
+Pass the scope and `<selected-effort>` explicitly when invoking the native skill.
 
 When a review worktree was created, switch the session into it before invoking `/code-review`, using `EnterWorktree` with `path` set to the worktree. This is required rather than a shell `Set-Location`: `/code-review` may spawn subagents, and they start in the session's working directory, so only a session switch keeps the original checkout out of the review. If `EnterWorktree` is unavailable or rejects the path, stop the background Codex task as required by the invariants before removing the worktree, then stop with `Cross-review cancelled: the review worktree could not be entered.` Never fall back to reviewing a checkout that does not hold the reviewed commit. A run reviewing the original checkout stays where it is and enters nothing.
 
@@ -309,7 +262,7 @@ The helper pins Codex with an exec-level `--cd`, so the review runs in the revie
 
 Never add a positional prompt to a scoped `codex exec review` invocation. The installed Codex CLI treats its optional `[PROMPT]` as custom review instructions and some builds reject it when `--base` or `--uncommitted` selects the scope. The helper always adds `--sandbox read-only --ephemeral`; `.reviews/**` is already excluded from local review input and a detached review worktree contains no review bookkeeping.
 
-When an exact Codex model was resolved, pass it explicitly to both invocations. The independent review always uses explicit `high` reasoning and the comparison always uses explicit `medium` reasoning, so both are recorded with source `explicit`. Omit an unresolved model and label it a default in output. Record each stage's settings separately as defined in the artifact contract and report both in the final output.
+When an exact Codex model was resolved, pass it explicitly to both invocations. The independent review and comparison both use `<selected-effort>` reasoning, recorded with source `explicit`. Omit an unresolved model and label it a default in output. Record each stage's settings separately as defined in the artifact contract and report both in the final output.
 
 If the review fails or is unusable, remove the temporary run data, clean up the review workspace as the invariants require, and stop without adjudication or history.
 
@@ -332,15 +285,19 @@ The run folder is permanent from this point. If a later step fails, leave it in 
 
 Keep any review worktree in place. The comparison and adjudication below must inspect the exact reviewed source. If any later step fails, clean up as the invariants require before stopping.
 
+For PR mode only, now snapshot its discussion into `<run_directory>/pr-comments.json` using `scripts/Get-PrCommentSnapshot.ps1` with the detected provider and validated identity arguments from [references/provider-workflow.md](references/provider-workflow.md). Prefer capable provider MCP operations, otherwise use Azure CLI or GitHub CLI and disclose the reason. GitHub capture includes conversation comments, submitted review summaries, inline threads, and every reply. Failed/incomplete retrieval is an error, never an empty discussion. Keep this point-in-time snapshot out of both independent reviews; note capture time in the report. Delete temporary raw payloads after normalization.
+
 ## 6. Codex comparison
 
-Invoke Codex again with the contents of [prompts/codex-evaluate.md](prompts/codex-evaluate.md), passing `--cd <review-workspace> --sandbox read-only --ephemeral`, the same resolved model when known, and `-c 'model_reasoning_effort="medium"'`. Always pass `--output-last-message <run_directory>/codex-evaluation.md` so the CLI saves the final response without a model-generated file write. With the prompt, supply the absolute paths of `<run_directory>/claude-review.md`, `codex-independent.md`, and `run-context.json`; these may live outside the review workspace. Codex validates only the existing findings with targeted source checks, proposes duplicate groups, and classifies each issue as `confirmed`, `rejected`, or `uncertain`.
+Invoke Codex again with the contents of [prompts/codex-evaluate.md](prompts/codex-evaluate.md), passing `--cd <review-workspace> --sandbox read-only --ephemeral`, the same resolved model when known, and `-c 'model_reasoning_effort="<selected-effort>"'`. Always pass `--output-last-message <run_directory>/codex-evaluation.md` so the CLI saves the final response without a model-generated file write. With the prompt, supply the absolute paths of `<run_directory>/claude-review.md`, `codex-independent.md`, `run-context.json`, and `pr-comments.json` in PR mode; these may live outside the review workspace. Codex validates model findings with targeted source checks, proposes duplicate groups, classifies each issue as `confirmed`, `rejected`, or `uncertain`, and assesses the PR discussion separately.
 
 Wait for successful comparison completion and read the final report before starting adjudication. If comparison fails or is unusable, stop without adjudication or history and clean up as the invariants require.
 
 ## 7. Claude adjudication and metrics
 
 Validate every proposed group against source, consulting repository guidance, tests, and history when useful. Read source and diffs from the review workspace selected in step 3, never from a checkout that does not hold the reviewed commit. Pay attention to Claude findings Codex rejected, Codex-only findings, severity disagreements, and duplicates.
+
+For PR mode, inspect `pr-comments.json` and the comparison's thread matches. Check comment-only concerns against the frozen source. In the final report, identify model findings already raised in a thread and include a separate `Existing PR discussion` section for verified comment-only issues, with thread ID, status, and source evidence. Mention obsolete, fixed, or unresolved claims only as useful context. Do not put comment-only issues in the adjudication ledger or model effectiveness metrics, and never treat a comment or resolved status as proof.
 
 Write `<run_directory>/adjudication.json` under schema version 3 in [references/artifact-contract.md](references/artifact-contract.md). Every `C-*` and `X-*` ID appears in exactly one group. `pull_request.id` is positive only for PR mode and `null` otherwise. Record disposition changes in `adjudication.codex_disposition_overrides`, using `[]` when empty.
 

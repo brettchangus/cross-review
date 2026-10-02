@@ -20,6 +20,8 @@ $storageSafetyScript = Join-Path $skillDirectory 'scripts/Assert-ReviewStorageSa
 $runDirectoryScript = Join-Path $skillDirectory 'scripts/New-ReviewRunDirectory.ps1'
 $workspaceScript = Join-Path $skillDirectory 'scripts/Remove-ReviewWorkspace.ps1'
 $confirmationScript = Join-Path $skillDirectory 'scripts/Resolve-ReviewConfirmation.ps1'
+$argumentsScript = Join-Path $skillDirectory 'scripts/Resolve-ReviewArguments.ps1'
+$prCommentsScript = Join-Path $skillDirectory 'scripts/Get-PrCommentSnapshot.ps1'
 $skillPath = Join-Path $skillDirectory 'SKILL.md'
 $passed = 0
 $failed = 0
@@ -140,6 +142,76 @@ try {
     }
 
     try {
+        $rawCommentsPath = Join-Path $testRoot 'pr-threads.json'
+        $snapshotPath = Join-Path $testRoot 'pr-comments.json'
+        Write-JsonFile $rawCommentsPath ([ordered]@{ count = 3; value = @(
+            [ordered]@{ id = 1; status = 'fixed'; isDeleted = $false; threadContext = @{ filePath = '/app.ps1'; rightFileStart = @{ line = 4 } }; comments = @(
+                @{ id = 1; parentCommentId = 0; commentType = 'text'; content = 'Check this case'; author = @{ displayName = 'Reviewer' } },
+                @{ id = 2; commentType = 'system'; content = 'Vote changed' },
+                @{ id = 4; commentType = 'codeChange'; content = 'File updated' },
+                @{ id = 3; commentType = 'text'; content = 'Deleted'; isDeleted = $true }
+            ) },
+            [ordered]@{ id = 2; isDeleted = $true; comments = @(@{ id = 1; commentType = 'text'; content = 'Hidden' }) },
+            [ordered]@{ id = 3; comments = @(@{ id = 1; commentType = 'system'; content = 'Build passed' }) }
+        ) })
+        & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
+        $snapshot = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+        if ($snapshot.pull_request_id -ne 1234 -or $snapshot.source -ne 'azure_devops_mcp' -or @($snapshot.threads).Count -ne 1 -or
+            $snapshot.threads[0].status -ne 'fixed' -or $snapshot.threads[0].context.filePath -ne '/app.ps1' -or
+            @($snapshot.threads[0].comments).Count -ne 1 -or $snapshot.threads[0].comments[0].content -ne 'Check this case') {
+            throw 'PR comment snapshot did not preserve the human thread and filter deleted/system entries.'
+        }
+        # Raw thread arrays: ConvertFrom-Json enumerates top-level arrays, so
+        # empty and single-thread responses need explicit coverage.
+        Set-Content -LiteralPath $rawCommentsPath -Encoding utf8 -Value '[]'
+        & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
+        if (@((Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json).threads).Count -ne 0) { throw 'An empty raw thread array was not accepted as an empty discussion.' }
+        Set-Content -LiteralPath $rawCommentsPath -Encoding utf8 -Value '[{"id":7,"status":"active","comments":[{"id":1,"commentType":"text","content":"Only thread"}]}]'
+        & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
+        $single = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+        if (@($single.threads).Count -ne 1 -or $single.threads[0].comments[0].content -ne 'Only thread') { throw 'A single-thread raw array was not preserved.' }
+        Write-JsonFile $rawCommentsPath ([ordered]@{ count = 2; value = @() })
+        try {
+            & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
+            throw 'An incomplete thread list was accepted.'
+        } catch {
+            if ($_.Exception.Message -notlike '*count does not match*') { throw }
+        }
+        $script:passed++
+        Write-Output 'PASS pr-comment-snapshot-normalization'
+    } catch {
+        $script:failed++
+        Write-Output "FAIL pr-comment-snapshot-normalization - $($_.Exception.Message)"
+    }
+
+    try {
+        $defaultArguments = & $argumentsScript | ConvertFrom-Json
+        $overrideArguments = & $argumentsScript -ReviewArguments @('pr', '1234', '--effort', 'xhigh') | ConvertFrom-Json
+        $reversedArguments = & $argumentsScript -ReviewArguments @('--effort', 'low', 'pr', '42') | ConvertFrom-Json
+        if ($defaultArguments.effort -ne 'medium' -or $null -ne $defaultArguments.pull_request_id -or
+            $overrideArguments.effort -ne 'xhigh' -or $overrideArguments.pull_request_id -ne 1234 -or
+            $reversedArguments.effort -ne 'low' -or $reversedArguments.pull_request_id -ne 42) {
+            throw 'Review argument parsing returned the wrong scope or effort.'
+        }
+        foreach ($invalid in @(
+            @('--effort', 'max'), @('--effort', 'high', '--effort', 'low'),
+            @('pr', '0'), @('pr', '12', 'pr', '13'), @('--unknown')
+        )) {
+            try {
+                & $argumentsScript -ReviewArguments $invalid | Out-Null
+                throw 'Invalid review arguments were accepted.'
+            } catch {
+                if ($_.Exception.Message -eq 'Invalid review arguments were accepted.') { throw }
+            }
+        }
+        $script:passed++
+        Write-Output 'PASS review-effort-argument-parsing'
+    } catch {
+        $script:failed++
+        Write-Output "FAIL review-effort-argument-parsing - $($_.Exception.Message)"
+    }
+
+    try {
         $expectedHash = (Get-FileHash -LiteralPath $skillPath).Hash
         $stalePath = Join-Path $skillDirectory 'scripts/Stale-Removed.ps1'
         Set-Content -LiteralPath $stalePath -Value 'stale'
@@ -248,8 +320,11 @@ try {
     }
 
     $invalidBranchBase = New-TestLedger @() @() @() 'branch'
-    $invalidBranchBase.pull_request.target_ref = 'refs/heads/develop'
-    Invoke-FailTest 'branch-invalid-default-base' $invalidBranchBase 'must identify main or master'
+    $invalidBranchBase.pull_request.target_ref = 'HEAD'
+    Invoke-FailTest 'branch-invalid-default-base' $invalidBranchBase 'valid default branch ref'
+    $developBase = New-TestLedger @() @() @() 'branch'
+    $developBase.pull_request.target_ref = 'refs/heads/develop'
+    Invoke-PassTest 'branch-arbitrary-default-base' $developBase { param($metrics) }
 
     $allRejected = New-TestLedger @(
         [pscustomobject]@{ id = 'C-001'; reviewer = 'claude'; severity = 'high' },
@@ -456,6 +531,7 @@ try {
     $reviewWorkspace = 'C:\temp\review-workspace'
     try {
         $prInvocation = & $codexInvocationScript -ReviewMode pull_request -BaseCommit $prBaseCommit -WorkingDirectory $reviewWorkspace -OutputPath 'C:\temp\codex-independent.md' -Model 'gpt-5.6-sol' -ReasoningEffort high | ConvertFrom-Json
+        $xhighInvocation = & $codexInvocationScript -ReviewMode uncommitted -WorkingDirectory $reviewWorkspace -OutputPath 'C:\temp\codex-xhigh.md' -ReasoningEffort xhigh | ConvertFrom-Json
         $branchInvocation = & $codexInvocationScript -ReviewMode branch -BaseCommit $branchBaseCommit -WorkingDirectory $reviewWorkspace -OutputPath 'C:\temp\codex-branch.md' | ConvertFrom-Json
         $uncommittedInvocation = & $codexInvocationScript -ReviewMode uncommitted -WorkingDirectory $reviewWorkspace -OutputPath 'C:\temp\codex-uncommitted.md' | ConvertFrom-Json
         $prArguments = @($prInvocation.arguments | ForEach-Object { [string]$_ })
@@ -471,6 +547,7 @@ try {
         if (($prArguments -join '|') -ne ('exec|--cd|{1}|--sandbox|read-only|--ephemeral|--model|gpt-5.6-sol|-c|model_reasoning_effort="high"|review|--base|{0}|--output-last-message|C:\temp\codex-independent.md' -f $prBaseCommit, $reviewWorkspace)) {
             throw 'PR invocation arguments are incorrect'
         }
+        if (@($xhighInvocation.arguments) -notcontains 'model_reasoning_effort="xhigh"') { throw 'Codex xhigh override was not passed to the CLI' }
         if (($branchArguments -join '|') -ne ('exec|--cd|{1}|--sandbox|read-only|--ephemeral|review|--base|{0}|--output-last-message|C:\temp\codex-branch.md' -f $branchBaseCommit, $reviewWorkspace)) {
             throw 'branch invocation arguments are incorrect'
         }
@@ -1480,6 +1557,8 @@ try {
 
 Write-Output "$passed passed, $failed failed"
 if ($failed -gt 0) { exit 1 }
+& (Join-Path $PSScriptRoot 'Run-ProviderTests.ps1')
+if ($LASTEXITCODE -ne 0) { exit 1 }
 if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
     & (Join-Path $PSScriptRoot 'Run-CodexTests.ps1') | Out-Null
 } else {

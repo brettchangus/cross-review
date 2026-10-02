@@ -248,22 +248,25 @@ try {
             $parameters = @{ Stage = 'independent'; WorkingDirectory = $scopeRepo; ReviewMode = $mode; Model = 'fixture-model'; AllowedToolsPath = $allowedToolsPath }
             if ($mode -ne 'uncommitted') { $parameters.BaseCommit = $scopeBase }
             $invocation = & $builder @parameters | ConvertFrom-Json
-            if ($invocation.effort -ne 'high' -or $invocation.arguments -notcontains '--no-session-persistence' -or
+            if ($invocation.effort -ne 'medium' -or $invocation.arguments -notcontains '--no-session-persistence' -or
                 $invocation.arguments -notcontains 'dontAsk' -or $invocation.arguments -notcontains 'fixture-model' -or
                 $invocation.arguments -contains '--dangerously-skip-permissions' -or $invocation.arguments -contains '--resume') { throw 'Incorrect Claude settings' }
             if ($mode -ne 'uncommitted' -and -not $invocation.standard_input.Contains($scopeBase + '...HEAD')) { throw 'Frozen diff scope missing' }
             # Chained commands are denied unless every part is separately allowed.
             if (-not $invocation.standard_input.Contains('Run one command per call')) { throw 'Single-command guidance missing' }
+            if (-not $invocation.standard_input.Contains('args="medium')) { throw 'Native review did not receive the default effort' }
         }
+        $overridden = & $builder -Stage independent -WorkingDirectory $scopeRepo -ReviewMode uncommitted -Effort xhigh -AllowedToolsPath $allowedToolsPath | ConvertFrom-Json
+        if ($overridden.effort -ne 'xhigh' -or -not $overridden.standard_input.Contains('args="xhigh')) { throw 'Claude effort override was not passed to the native skill' }
         Expect-Failure { & $builder -Stage independent -WorkingDirectory $testRoot -ReviewMode branch -BaseCommit main -AllowedToolsPath $allowedToolsPath } 'full frozen target commit'
         Expect-Failure { & $builder -Stage independent -WorkingDirectory $testRoot -ReviewMode uncommitted -BaseCommit ('a' * 40) -AllowedToolsPath $allowedToolsPath } 'must be omitted'
         [IO.File]::WriteAllText((Join-Path $scopeRepo 'unrelated.txt'), 'Uncommitted source')
         Expect-Failure { & $builder -Stage independent -WorkingDirectory $scopeRepo -ReviewMode branch -BaseCommit $scopeBase -AllowedToolsPath $allowedToolsPath } 'requires a clean workspace'
     }
     Test-Case 'claude-comparison-inputs' {
-        $inputPaths = @('claude.md', 'codex.md', 'context.json') | ForEach-Object { Join-Path $testRoot $_ }
+        $inputPaths = @('claude.md', 'codex.md', 'context.json', 'pr-comments.json') | ForEach-Object { Join-Path $testRoot $_ }
         foreach ($path in $inputPaths) { [IO.File]::WriteAllText($path, 'fixture') }
-        $invocation = & $builder -Stage comparison -WorkingDirectory $testRoot -ClaudeReviewPath $inputPaths[0] -CodexReviewPath $inputPaths[1] -RunContextPath $inputPaths[2] -AllowedToolsPath $allowedToolsPath | ConvertFrom-Json
+        $invocation = & $builder -Stage comparison -WorkingDirectory $testRoot -ClaudeReviewPath $inputPaths[0] -CodexReviewPath $inputPaths[1] -RunContextPath $inputPaths[2] -PrCommentsPath $inputPaths[3] -AllowedToolsPath $allowedToolsPath | ConvertFrom-Json
         if ($invocation.effort -ne 'medium' -or $invocation.arguments -contains '--resume') { throw 'Comparison effort or freshness incorrect' }
         foreach ($path in $inputPaths) { if (-not $invocation.standard_input.Contains(($path | ConvertTo-Json -Compress))) { throw 'Missing escaped input path' } }
         if (-not $invocation.standard_input.Contains('Run one command per call')) { throw 'Single-command guidance missing' }
@@ -449,15 +452,16 @@ try {
     $success = @{ type = 'result'; subtype = 'success'; is_error = $false; result = 'No findings.'; permission_denials = @() }
     Test-Case 'claude-valid-native-report' {
         Write-Transcript ($nativeEvents + @($success))
-        $value = & $reader -TranscriptPath $transcriptPath -OutputPath $reportPath -RequireNativeReview | ConvertFrom-Json
+        $value = & $reader -TranscriptPath $transcriptPath -OutputPath $reportPath -RequireNativeReview -ExpectedEffort high | ConvertFrom-Json
         if (-not $value.native_review_observed -or (Get-Content -LiteralPath $reportPath -Raw) -ne 'No findings.') { throw 'Native extraction failed' }
+        Expect-Failure { & $reader -TranscriptPath $transcriptPath -OutputPath $reportPath -RequireNativeReview -ExpectedEffort medium } 'No successful native'
     }
     Test-Case 'claude-rejects-generic-or-failed-native-review' {
         Write-Transcript @($success)
-        Expect-Failure { & $reader -TranscriptPath $transcriptPath -OutputPath $reportPath -RequireNativeReview } 'No successful native'
+        Expect-Failure { & $reader -TranscriptPath $transcriptPath -OutputPath $reportPath -RequireNativeReview -ExpectedEffort high } 'No successful native'
         $nativeEvents[1].message.content[0].is_error = $true
         Write-Transcript ($nativeEvents + @($success))
-        Expect-Failure { & $reader -TranscriptPath $transcriptPath -OutputPath $reportPath -RequireNativeReview } 'No successful native'
+        Expect-Failure { & $reader -TranscriptPath $transcriptPath -OutputPath $reportPath -RequireNativeReview -ExpectedEffort high } 'No successful native'
         $nativeEvents[1].message.content[0].is_error = $false
     }
     Test-Case 'claude-rejects-error-empty-and-truncated-results' {

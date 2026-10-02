@@ -11,11 +11,14 @@ param(
     [string]$MetadataPath,
 
     [Parameter(Mandatory, ParameterSetName = 'Local')]
-    [switch]$LocalOnly
+    [switch]$LocalOnly,
+
+    [string]$RemoteName = 'origin'
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'ReviewProvider.ps1')
 
 function Assert-Text {
     param(
@@ -51,20 +54,7 @@ function Invoke-GitText {
         [Parameter(Mandatory)][string]$FailureMessage
     )
 
-    $output = @(& git @Arguments 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FailureMessage $($output -join [Environment]::NewLine)"
-    }
-    $stdout = @($output | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
-    return (($stdout | ForEach-Object { [string]$_ }) -join [Environment]::NewLine).Trim()
-}
-
-function Invoke-GitOptionalText {
-    param([Parameter(Mandatory)][string[]]$Arguments)
-
-    $output = @(& git @Arguments 2>$null)
-    if ($LASTEXITCODE -ne 0) { return $null }
-    return (($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine).Trim()
+    return Invoke-ReviewGit -Arguments $Arguments -FailureMessage $FailureMessage
 }
 
 function Get-SanitizedRemoteUrl {
@@ -187,7 +177,7 @@ if ([string]::IsNullOrWhiteSpace($localBranch)) {
     throw 'Cannot resolve the current local branch. Detached HEAD is not supported.'
 }
 $localHead = Invoke-GitText @('-C', $repositoryRoot, 'rev-parse', 'HEAD') 'Cannot resolve the local HEAD commit.'
-$rawOriginUrl = Invoke-GitOptionalText @('-C', $repositoryRoot, 'remote', 'get-url', 'origin')
+$rawOriginUrl = Get-ReviewRemoteUrl -RepositoryRoot $repositoryRoot -RemoteName $RemoteName -Optional
 $originUrl = if ([string]::IsNullOrWhiteSpace($rawOriginUrl)) { $null } else { Get-SanitizedRemoteUrl $rawOriginUrl }
 $expectedSourceRef = "refs/heads/$localBranch"
 

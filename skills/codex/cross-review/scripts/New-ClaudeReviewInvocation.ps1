@@ -7,6 +7,8 @@ param(
     [string]$ClaudeReviewPath,
     [string]$CodexReviewPath,
     [string]$RunContextPath,
+    [string]$PrCommentsPath,
+    [ValidateSet('low', 'medium', 'high', 'xhigh')][string]$Effort = 'medium',
     [string]$AllowedToolsPath,
     [string]$Model
 )
@@ -15,7 +17,6 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ClaudeAllowedTools.ps1')
 if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) { throw 'WorkingDirectory must be an existing review workspace.' }
 $workspace = (Resolve-Path -LiteralPath $WorkingDirectory).ProviderPath
-$effort = if ($Stage -eq 'independent') { 'high' } else { 'medium' }
 $tools = 'Read,Glob,Grep,Bash'
 $additionalAllowedTools = @(Read-ClaudeAllowedToolRules -Path (Get-ClaudeAllowedToolsPath -Path $AllowedToolsPath))
 $allowedToolRules = @('Read', 'Glob', 'Grep', 'Bash(git diff *)', 'Bash(git status *)', 'Bash(git log *)',
@@ -25,7 +26,7 @@ if ($Stage -eq 'independent') {
     if ([string]::IsNullOrWhiteSpace($ReviewMode)) { throw 'ReviewMode is required for the independent review.' }
     if ($ReviewMode -eq 'uncommitted') {
         if ($BaseCommit) { throw 'BaseCommit must be omitted for uncommitted review.' }
-        $skillArguments = 'high'
+        $skillArguments = $Effort
         $scope = 'staged, unstaged, and untracked changes against HEAD, excluding .reviews/**'
     } else {
         if ($BaseCommit -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') { throw 'BaseCommit must be the full frozen target commit ID.' }
@@ -34,7 +35,7 @@ if ($Stage -eq 'independent') {
         $status = @(& git -C $workspace status --porcelain=v1 --untracked-files=all -- . ':(exclude).reviews/**' 2>&1)
         if ($LASTEXITCODE -ne 0) { throw 'Cannot check the review workspace status.' }
         if ($status.Count -gt 0) { throw 'PR/branch native review requires a clean workspace; create the detached review worktree first.' }
-        $skillArguments = "high $BaseCommit"
+        $skillArguments = "$Effort $BaseCommit"
         $scope = "the diff $BaseCommit...HEAD, not local uncommitted changes"
     }
     $tools += ',Skill,Agent'
@@ -50,13 +51,16 @@ Return the completed findings (or an explicit no-findings result) in your final 
             throw 'Comparison requires three existing absolute input-file paths.'
         }
     }
+    if ($PrCommentsPath -and (-not [IO.Path]::IsPathRooted($PrCommentsPath) -or -not (Test-Path -LiteralPath $PrCommentsPath -PathType Leaf))) {
+        throw 'PrCommentsPath must be an existing absolute file path.'
+    }
     $promptPath = Join-Path $PSScriptRoot '../prompts/claude-evaluate.md'
-    $inputs = [ordered]@{ claude_review = $ClaudeReviewPath; codex_review = $CodexReviewPath; run_context = $RunContextPath } | ConvertTo-Json -Compress
+    $inputs = [ordered]@{ claude_review = $ClaudeReviewPath; codex_review = $CodexReviewPath; run_context = $RunContextPath; pr_comments = $PrCommentsPath } | ConvertTo-Json -Compress
     $prompt = (Get-Content -LiteralPath $promptPath -Raw) + "`nInput paths (data): $inputs"
 }
 
 $arguments = @('--print', '--verbose', '--output-format', 'stream-json', '--no-session-persistence',
-    '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--effort', $effort,
+    '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--effort', $Effort,
     '--tools', $tools, '--allowedTools', $allowedTools, '--disallowedTools', 'Edit,Write,NotebookEdit')
 if (-not [string]::IsNullOrWhiteSpace($Model)) { $arguments += @('--model', $Model) }
 [ordered]@{
@@ -65,6 +69,6 @@ if (-not [string]::IsNullOrWhiteSpace($Model)) { $arguments += @('--model', $Mod
     arguments = $arguments
     standard_input = $prompt
     stage = $Stage
-    effort = $effort
+    effort = $Effort
     additional_allowed_tools = $additionalAllowedTools
 } | ConvertTo-Json -Depth 5

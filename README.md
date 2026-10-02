@@ -4,7 +4,7 @@
 
 `cross-review` runs Claude's native `/code-review` and Codex's native review independently on the same change, reconciles their findings against the source, and records how each reviewer performed. The result is a single verified report, plus metrics that show over time how much each model contributes.
 
-It works on Azure DevOps pull requests, uncommitted changes, and branch comparisons. It is read-only: it never edits code, posts comments, or changes PR state.
+It works on Azure DevOps and GitHub pull requests, uncommitted changes, and branch comparisons. It is read-only: it never edits code, posts comments, or changes PR state.
 
 ## Contents
 
@@ -35,7 +35,7 @@ There are two implementations with the same workflow. They differ in which tool 
 |---|---|---|
 | Invoked from | Claude Code: `/cross-review` | Codex: `$cross-review` |
 | Independent reviews | Codex in the background, Claude in the session | Both as fresh child processes, concurrently |
-| Comparison pass | Codex (`medium` reasoning) | Claude (`medium` effort) |
+| Comparison pass | Codex (selected effort) | Claude (selected effort) |
 | Final adjudication | Claude, in the session | Codex, in the session |
 | Run folders | `.reviews/runs/*_claude-led_*` | `.reviews/runs/*_codex-led_*` |
 
@@ -50,7 +50,9 @@ Select the review scope
 
 The two reviews start before either has written any findings, so neither can see the other's output. The comparison pass groups what the reviewers found and checks each group with targeted reads of the relevant source; it does not re-review the diff. The host then makes the final call on each finding from the source.
 
-Both reviewers run at pinned levels (Claude `/code-review high`, Codex reasoning `high`), so results are reproducible and comparable between runs.
+For PR reviews, the skill captures existing text comment threads after the independent reviews finish. The comparison pass matches them to model findings and checks comment-only concerns against the frozen source. The final report identifies findings already discussed on the PR and lists verified comment-only issues under `Existing PR discussion`. Those issues do not count toward either model's effectiveness metrics. PR comment retrieval uses a capable provider MCP operation or its authenticated CLI fallback. GitHub capture includes conversation comments, review summaries, inline threads, and all replies, retaining resolved/outdated state and current/original locations.
+
+Both reviewers and the comparison pass run at the selected effort, `medium` by default. Pinning each stage makes runs reproducible; the host's final adjudication uses its current session effort.
 
 ## Requirements
 
@@ -58,11 +60,12 @@ Both reviewers run at pinned levels (Claude `/code-review high`, Codex reasoning
 - [Codex CLI](https://learn.chatgpt.com/docs/non-interactive-mode) with `codex exec review`
 - Git
 - PowerShell 5.1 or later for the Claude-led skill; PowerShell 7.4 or later (`pwsh`) for the Codex-led skill
-- For pull request reviews only:
-  - Azure DevOps MCP configured in Claude Code (preferred), or
-  - Azure CLI with the `azure-devops` extension and authenticated defaults (fallback)
+- For Azure DevOps PR reviews: Azure DevOps MCP (preferred), or authenticated Azure CLI with the `azure-devops` extension (fallback)
+- For GitHub PR reviews: capable GitHub MCP operations (preferred), or authenticated [GitHub CLI](https://cli.github.com/) (`gh`, fallback)
 
-Uncommitted and branch reviews need neither Azure DevOps nor a configured remote.
+Metadata and discussion operations are checked separately; an MCP connection that can read a PR may still need CLI fallback to capture complete discussion. Failed or incomplete requests are reported as errors.
+
+Uncommitted and branch reviews need no provider API authentication. A remote branch comparison uses Git authentication; local main/master comparisons work without a remote.
 
 The Codex-led skill needs a native `claude` executable on `PATH` and a complete native Codex installation. It discovers `codex.exe` from `PATH` or standard local installation locations, and requires `codex-code-mode-host.exe` beside it. The Codex reviewer also needs write access to its runtime home under `CODEX_HOME`; its source-review sandbox remains read-only.
 
@@ -106,6 +109,9 @@ In Claude Code:
 ```text
 /cross-review
 /cross-review pr 1234
+/cross-review --effort high
+/cross-review pr 1234 --effort xhigh
+/cross-review pr https://github.com/owner/repo/pull/1234
 ```
 
 In Codex:
@@ -113,6 +119,9 @@ In Codex:
 ```text
 $cross-review
 $cross-review pr 1234
+$cross-review --effort high
+$cross-review pr 1234 --effort xhigh
+$cross-review pr https://github.com/owner/repo/pull/1234
 ```
 
 ### Choosing what to review
@@ -120,16 +129,24 @@ $cross-review pr 1234
 With no arguments, the skill reviews the first of these that applies:
 
 1. Uncommitted changes (staged, unstaged, or untracked) against `HEAD`
-2. The active Azure DevOps pull request for the current branch
-3. The current branch against the repository's default branch (`main` or `master`)
+2. The active/open Azure DevOps or GitHub pull request for the current source repository and branch
+3. The current branch against the repository's actual default branch (any valid name; main/master are local fallbacks)
 
 If none applies, there is nothing to review. Passing `pr <id>` reviews that pull request ahead of everything else.
 
-A pull request must match the branch you have checked out and your local repository. The skill never switches your branch.
+A pull request must match your exact checked-out branch and validated local repository identities. GitHub forks are supported: the source remote identifies the fork, and an explicit PR URL can select the target repository's local upstream remote. The skill never switches your branch.
+
+Provider detection uses the branch tracking remote, then origin, then a sole remote. Ambiguous remotes stop. GitHub HTTPS and SSH URLs are recognized; configure `GH_HOST` for GitHub Enterprise. Unknown providers and repositories without a remote retain local review support.
+
+Every preflight shows `Repository provider: GitHub (github.com)`, `Azure DevOps (<host>)`, `Unknown (<host or local remote>)`, or `Local Git (no remote)`, independently of whether PR lookup ran. PR metadata separately shows MCP/CLI and any fallback reason. Provider and host are also saved in artifacts and shown in the final report.
+
+Use `--effort low|medium|high|xhigh` to set the two independent reviewers and comparison pass. The default is `medium`. The option can appear before or after `pr <id>`. It does not change the effort of the already-running Claude or Codex session that makes the final decisions; the preflight shows that session's effort when available. Model or organization limits may cap a requested level, so any reported fallback is disclosed in the result.
 
 ### Confirming a run
 
 Before anything runs, the skill shows a complete preflight and asks for confirmation. The preflight covers the scope, source and target commits, tools, models and effort levels, review size, and estimated duration. Only `y` or `yes` continues. Any other answer, including cancelling, stops without creating any files, worktrees, or history.
+
+Claude Code displays an interactive Yes/No selector. Codex displays the preflight in chat and uses a short inline Yes/No question only when the host permits a blocking input tool for approval in the active mode. When that tool is unavailable, restricted, or fails, Codex asks you to reply yes or no in chat. It does not use queued asynchronous follow-up questions for confirmation. A skill cannot change how Codex renders input tools, and printing Yes/No bullets does not create a selector.
 
 To preview a run without starting it, invoke the skill and answer `no`.
 
@@ -146,6 +163,7 @@ Each run gets its own folder under `.reviews/runs/` in the reviewed repository. 
       run-context.json              scope, commits, tools, models, and estimate
       claude-review.md              Claude's independent review
       codex-independent.md          Codex's independent review
+      pr-comments.json              PR discussion snapshot (PR reviews only)
       codex-evaluation.md           comparison pass (claude-evaluation.md for Codex-led)
       adjudication.json             final decision on every finding
       metrics.json                  calculated metrics
@@ -202,9 +220,9 @@ History is used to estimate how long future reviews will take. Failed or decline
 ## Security and privacy
 
 - **Read-only.** Both Codex stages run with `--sandbox read-only --ephemeral`. Claude runs without edit tools and without bypassing permissions. The skill never requests an approval bypass or a writable sandbox.
-- **No credentials.** The skills use your existing Claude Code, Codex, Git, and Azure DevOps sessions with their current permissions.
+- **No credentials.** The skills use your existing Claude Code, Codex, Git, Azure DevOps, and GitHub sessions with their current permissions.
 - **URL sanitization.** Credentials, query strings, and fragments are removed from repository URLs before they are shown or stored, so a token embedded in `origin` never reaches the history.
-- **Untrusted input.** Repository content, diffs, PR metadata, branch names, and reviewer output are treated as data, not instructions. Command arguments are passed as discrete values rather than shell text, Azure DevOps refs must be valid `refs/heads/*` refs, and review storage paths are checked against symbolic-link and directory redirection before anything is written.
+- **Untrusted input.** Repository content, diffs, PR metadata, branch names, and reviewer output are treated as data, not instructions. Command arguments are passed as discrete values rather than shell text, provider branch refs must be valid `refs/heads/*` refs, and review storage paths are checked against symbolic-link and directory redirection before anything is written.
 - **Frozen commits.** Both reviewers receive the exact source and target commits shown in the preflight, not branch names, so a fetch or push during the review cannot change what was approved.
 
 > [!IMPORTANT]
@@ -215,11 +233,11 @@ History is used to estimate how long future reviews will take. Failed or decline
 <details>
 <summary>Pull request resolution</summary>
 
-PR metadata comes from the Azure DevOps MCP server. The Azure CLI (`az repos pr`) is used only if the MCP server is unavailable or its response is unusable.
+PR metadata comes from the detected provider's MCP operations, with Azure CLI or GitHub CLI fallback when an operation is unavailable or deficient. Both paths use the same provider validator. Identity, branch, inactive/closed PR, and ambiguity failures stop rather than trigger fallback.
 
-A branch mismatch, repository or project mismatch, inactive PR, or multiple matching PRs stops the run; these are safety failures, not reasons to try the fallback. Both paths pass through the same validator, which checks the PR against your local branch and `origin`. The CLI fallback derives the organization, project, and repository from `origin`.
+GitHub resolution validates target and source repository identities, including forks. Source is fetched through the target repository's PR head ref; target is the actual base branch. The fetched source commit is checked against metadata before preflight; moved PRs get a bounded metadata refresh/retry. For both providers the freshly fetched target is authoritative, because neither reports the current base-branch tip.
 
-PR source and target refs are fetched fresh, so rebased and force-pushed branches are handled. PR lookup is skipped when uncommitted changes take precedence, and is not attempted when the repository has no Azure DevOps remote.
+PR lookup is skipped when uncommitted changes take precedence and for unsupported providers/no remote. The shared [provider workflow](shared/references/provider-workflow.md) describes detection, raw MCP contracts, pagination, fetching, and discussion normalization.
 
 </details>
 
@@ -237,11 +255,11 @@ The worktree is kept until adjudication finishes, so every source check sees the
 
 | Stage | Setting |
 |---|---|
-| Claude independent review | `/code-review high` |
-| Codex independent review | reasoning `high` |
-| Comparison pass | `medium` |
+| Claude independent review | `/code-review <selected-effort>` |
+| Codex independent review | reasoning `<selected-effort>` |
+| Comparison pass | `<selected-effort>` |
 
-Every level is pinned explicitly. Without that, Claude would reuse the level from your last `/code-review` and Codex would use whatever `model_reasoning_effort` is in your configuration, which the skill cannot read back. The comparison pass runs lighter because judging existing findings is less work than finding them.
+Every launched stage is pinned explicitly. Without that, Claude would reuse the level from your last `/code-review` and Codex would use whatever `model_reasoning_effort` is in your configuration, which the skill cannot read back. Effort names are provider-specific and do not imply equal reasoning budgets.
 
 For Claude-led runs, the Claude model comes from the current session. For Codex-led runs, the skill discovers Claude's configured model from the environment or settings and passes it to both Claude stages when found. The Codex model comes from read-only `codex doctor --json` diagnostics; Codex-led diagnostics and reviewer processes use the same Codex home. If a model cannot be determined without making a model request, the preflight says so rather than guessing. Each stage's settings are recorded separately, so a change in results can be traced to the setting that caused it.
 
@@ -263,7 +281,7 @@ Timing starts when you confirm, so time spent reading the preflight is not count
 
 The Codex-led skill runs both reviewers as child processes. The supervisor starts both before waiting, reads both output streams, and stops the whole process tree on failure or after a 30-minute stage timeout. It records process IDs, start times, and transcript paths, so `Stop-ReviewProcesses.ps1` can cancel a run without mistaking a reused process ID for a reviewer.
 
-A review counts only if the reviewer finished and produced a report: Claude must have run the native `code-review high`, and Codex must have completed its turn. A missing native skill stops the run; it is never replaced with a generic review prompt. Tool or sandbox denials are kept as diagnostics rather than failing an otherwise complete report.
+A review counts only if the reviewer finished and produced a report: Claude must have run native `code-review` at the selected effort, and Codex must have completed its turn. A missing native skill stops the run; it is never replaced with a generic review prompt. Tool or sandbox denials are kept as diagnostics rather than failing an otherwise complete report.
 
 After the run, the skill lists commands the Claude reviewer was denied and can offer narrow rules, such as `Bash(ls *)`, to allow on future runs. It adds only rules you explicitly accept, stores them in `%USERPROFILE%\.codex\cross-review\claude-allowed-tools.json`, and never grants blanket `Bash` access. Codex denials are reported but never added to an allowlist, because that would weaken the read-only sandbox.
 
@@ -281,6 +299,7 @@ shared/
 tests/
   Run-Tests.ps1           test entry point, Claude-led and shared helpers
   Run-CodexTests.ps1      Codex-led helpers
+  Run-ProviderTests.ps1   provider identities, forks, discussion pagination, and fetch guards
 Install-Skill.ps1
 ```
 
