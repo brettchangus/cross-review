@@ -27,6 +27,8 @@ Select exactly one scope in this order:
 3. **Discovered PR:** for a detected Azure DevOps or GitHub provider, find exactly one active/open PR for the exact source repository and current branch. Follow [references/provider-workflow.md](references/provider-workflow.md). No match proceeds to branch comparison; multiple matches stop. For unknown providers or no remote, skip discovery.
 4. **Branch:** resolve and refresh the actual default branch with `scripts/Resolve-ReviewBase.ps1` using the selected remote. Any valid default branch name is supported. If `is_default_branch` is true, nothing to review. Otherwise freeze the returned target commit. Mode is `branch`, PR ID null, source is current branch/HEAD.
 
+If a required PR/default-branch fetch is denied by the host sandbox, follow the narrow fetch-only approval and retry procedure in [references/provider-workflow.md](references/provider-workflow.md). Request permission for that fetch operation alone, then resume scope resolution; do not ask for Full access. Fetch approval does not replace the review confirmation below or change either reviewer's sandbox.
+
 If nothing is reviewable, report that and finish without artifacts or history.
 
 ### PR resolution

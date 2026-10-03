@@ -95,7 +95,7 @@ head push, and Azure `lastMergeTargetCommit` may lag. The freshly fetched target
 is authoritative for both. On a moved-PR error, refresh the full metadata using
 the same access method, revalidate, and retry up to twice. Stop if it keeps moving.
 Never present a preflight for mismatched revisions. Delete temporary context files
-on cancellation/cleanup. Do not broaden permissions to recover a fetch failure.
+on cancellation/cleanup. Handle fetch permission failures as described below.
 
 For non-PR branch scope, use `Resolve-ReviewBase.ps1`. It reads the selected
 remote's advertised default branch (any valid name), fetches it, and returns
@@ -103,6 +103,26 @@ remote's advertised default branch (any valid name), fetches it, and returns
 Without a remote, use an existing main/master branch. Stop when no base resolves;
 when already on the resolved default branch there is nothing to review. Freeze
 the result as usual. A failed remote lookup/fetch is an error.
+
+## Fetch permission recovery
+
+If a required PR or default-branch fetch fails because the host sandbox denies
+network access or writes to Git metadata (for example `.git/FETCH_HEAD`), request
+narrow host approval and retry only the required fetch operation. When fetching
+through `Get-ReviewPrScope.ps1` or `Resolve-ReviewBase.ps1`, isolate that helper
+invocation in its own approval request; do not bundle setup or reviewer commands.
+Retain the validated repository, remote, refs, and context arguments. Use the
+host's command approval mechanism (in Codex, `exec_command` with
+`sandbox_permissions: require_escalated` and a fetch-specific justification).
+Do not request Full access, persistent blanket Git permissions, an approval
+bypass, or a writable reviewer sandbox.
+
+If approval is denied or unavailable, stop and report the required fetch access.
+Authentication, network/service, invalid-ref, and identity/PR guard failures are
+errors, not reasons to request broader host permissions. After a successful
+retry, use the helper's validated frozen commits and continue to estimation and
+the normal review confirmation. Fetch approval does not authorize the review or
+any later setup operation; those retain their existing permission requirements.
 
 ## Preflight and saved identity
 

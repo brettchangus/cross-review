@@ -220,6 +220,7 @@ History is used to estimate how long future reviews will take. Failed or decline
 ## Security and privacy
 
 - **Read-only.** Both Codex stages run with `--sandbox read-only --ephemeral`. Claude runs without edit tools and without bypassing permissions. The skill never requests an approval bypass or a writable sandbox.
+- **Fetch permissions.** If the host sandbox blocks a required PR or default-branch fetch, the skill requests narrow approval for that fetch operation and retries it. It does not request Full access; the review confirmation and reviewer sandbox restrictions still apply.
 - **No credentials.** The skills use your existing Claude Code, Codex, Git, Azure DevOps, and GitHub sessions with their current permissions.
 - **URL sanitization.** Credentials, query strings, and fragments are removed from repository URLs before they are shown or stored, so a token embedded in `origin` never reaches the history.
 - **Untrusted input.** Repository content, diffs, PR metadata, branch names, and reviewer output are treated as data, not instructions. Command arguments are passed as discrete values rather than shell text, provider branch refs must be valid `refs/heads/*` refs, and review storage paths are checked against symbolic-link and directory redirection before anything is written.
