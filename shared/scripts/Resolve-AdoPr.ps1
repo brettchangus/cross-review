@@ -319,6 +319,12 @@ if (-not [string]::Equals($returnedProjectName, $adoContext.project, [System.Str
 
 $sourceCommitObject = Get-PropertyValue $pr @('lastMergeSourceCommit', 'sourceCommit')
 $targetCommitObject = Get-PropertyValue $pr @('lastMergeTargetCommit', 'targetCommit')
+# Agent-written MCP payloads must keep the source commit; Get-ReviewPrScope skips
+# its fetched-source check when this is empty.
+if ($metadataSource -eq 'azure-devops-mcp' -and ($null -eq $sourceCommitObject -or
+        [string]::IsNullOrWhiteSpace([string](Get-PropertyValue $sourceCommitObject @('commitId', 'id'))))) {
+    throw 'MCP metadata omits lastMergeSourceCommit.commitId.'
+}
 $repositoryUrl = [string](Get-PropertyValue $repository @('webUrl', 'url'))
 if ([string]::IsNullOrWhiteSpace($repositoryUrl)) { $repositoryUrl = $originUrl }
 $repositoryUrl = Get-SanitizedRemoteUrl $repositoryUrl

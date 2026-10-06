@@ -53,14 +53,25 @@ and exact source repository/branch; get the sole candidate in full. Pagination m
 be complete before declaring no match or a sole match. For GitHub, the CLI adapter
 uses REST head filtering and validates the returned source repository as well.
 
-Pass complete raw get metadata to `Resolve-ReviewPr.ps1 -MetadataPath <file>`.
-Also pass `-PullRequestId <number>` for explicit requests and `-PrUrl <url>` when
-present. Store temporary metadata outside the reviewed repository and delete it
-after normalization. Do not reconstruct metadata. Azure accepts its existing
-full PR record and status enum shapes. GitHub accepts a complete REST-shaped PR
-record with `number`, `state`, `html_url`, `head` and `base` (each containing
-`ref`, `sha`, and `repo.full_name`). An unusable MCP shape qualifies for CLI
-fallback; a usable record that fails an identity guard does not.
+Pass the get metadata to `Resolve-ReviewPr.ps1 -MetadataPath <file>`. Also pass
+`-PullRequestId <number>` for explicit requests and `-PrUrl <url>` when present.
+Store temporary metadata outside the reviewed repository and delete it after
+normalization. Request the MCP's full response when it offers one, since trimmed
+output may omit required fields.
+
+An MCP result reaches a script only through a file you write, so write just the
+fields below, not the whole response. Keep the provider's field names and
+nesting, and copy each value verbatim. Never fill in, infer, or reformat a value
+the response lacks: a missing required field makes the MCP shape unusable, which
+qualifies for CLI fallback; a usable record that fails an identity guard does not.
+
+- Azure requires `pullRequestId`, `status` (name or number), `sourceRefName`,
+  `targetRefName`, `repository.id`, `repository.name`, and
+  `lastMergeSourceCommit.commitId`. It uses `title`, `repository.webUrl`,
+  `repository.project.id`, `repository.project.name`, and
+  `lastMergeTargetCommit.commitId` when present.
+- GitHub requires `number`, `state`, `html_url`, and `head` and `base`, each with
+  `ref`, `sha`, and `repo.full_name`. It uses `title` and `draft` when present.
 
 CLI fallback calls:
 
@@ -168,14 +179,45 @@ Capture discussion only after both independent reviews finish. Use the shared
 
 Prefer a capable MCP operation, supplying `-RawResponsePath <file>`, otherwise
 use the provider CLI and disclose why. Azure retains its raw thread-array/value
-envelope contract. GitHub raw input must be a complete GraphQL response (or a
+envelope contract; the MCP serializes comment types and thread statuses as
+numbers, which the script normalizes. A raw array carries no count, so request
+the MCP's full response and page with `skip`/`top` until a page returns fewer
+than `top` threads, then supply the combined array. As with metadata, write only
+the fields the script reads, verbatim. Keep every thread, including system-only
+ones; the script does the filtering. Per thread: `id`, `status`, `isDeleted`,
+`publishedDate`, `lastUpdatedDate`, `threadContext`, `pullRequestThreadContext`,
+and `comments`. Per comment: `id`, `parentCommentId`, `author.displayName`,
+`content`, `publishedDate`, `lastUpdatedDate`, `commentType`, and `isDeleted`.
+Leave out `_links`, avatars, `usersLiked`, `properties`, and identity descriptors.
+
+GitHub raw input must be a complete GraphQL response (or a
 `repository` envelope), including repository `nameWithOwner`, URL, PR number,
 and `comments`, `reviews`, and `reviewThreads` connections. Each connection
 needs `nodes` and `pageInfo.hasNextPage:false`, including every thread's comments.
+Entries need `id`, `body`, `author.login`, `createdAt`, `updatedAt`, and `url`
+(reviews add `state`; thread replies add `replyTo.id`, `commit.oid`, and
+`originalCommit.oid`). Threads need `id`, `isResolved`, `isOutdated`, `path`,
+`line`, `originalLine`, `startLine`, `originalStartLine`, `diffSide`,
+`startDiffSide`, `resolvedBy.login`, and `comments`.
 The CLI paginates all three connections and every thread's replies separately.
 Missing capabilities, GraphQL errors, incomplete pages, and access failures are
 errors, never empty discussions. A deficient MCP response may fall back to CLI;
 an identity mismatch stops. Delete temporary raw payloads after normalization.
+
+If neither MCP nor CLI yields a complete capture (for example, the MCP response
+is deficient and the CLI is missing, unauthenticated, or fails), do not stop the
+run. Record the gap instead, naming both failures:
+
+```powershell
+& '<skill_dir>/scripts/Get-PrCommentSnapshot.ps1' -Provider <provider> `
+  <same identity arguments> -OutputPath <artifact_dir>/pr-comments.json `
+  -UnavailableReason '<what MCP and CLI each failed with>'
+```
+
+That snapshot has `capabilities.complete: false`, `source: unavailable`,
+`unavailable_reason`, and no threads. It means the discussion was not captured,
+never that the PR has no comments. An identity mismatch still stops; it is not
+a retrieval failure.
 
 GitHub preserves conversation comments, submitted review summaries, inline
 threads and replies, resolved/outdated state, original/current locations,

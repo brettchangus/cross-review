@@ -170,6 +170,46 @@ try {
         & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
         $single = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
         if (@($single.threads).Count -ne 1 -or $single.threads[0].comments[0].content -ne 'Only thread') { throw 'A single-thread raw array was not preserved.' }
+        # The Azure DevOps MCP serializes enums as numbers (commentType 1 = text, status 2 = fixed).
+        Set-Content -LiteralPath $rawCommentsPath -Encoding utf8 -Value '[{"id":8,"status":2,"comments":[{"id":1,"commentType":1,"content":"Numeric text"},{"id":2,"commentType":3,"content":"Numeric system"}]},{"id":9,"status":1,"comments":[{"id":1,"commentType":2,"content":"Numeric code change"}]}]'
+        & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
+        $numeric = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+        if (@($numeric.threads).Count -ne 1 -or $numeric.threads[0].status -ne 'fixed' -or @($numeric.threads[0].comments).Count -ne 1 -or
+            $numeric.threads[0].comments[0].content -ne 'Numeric text' -or $numeric.threads[0].comments[0].type -ne 'text') {
+            throw 'Numeric MCP comment types and thread statuses were not normalized.'
+        }
+        Set-Content -LiteralPath $rawCommentsPath -Encoding utf8 -Value '[{"id":10,"status":1,"comments":[{"id":1,"commentType":42,"content":"Unknown type"}]}]'
+        try {
+            & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
+            throw 'An unrecognized comment type was silently dropped.'
+        } catch {
+            if ($_.Exception.Message -notlike '*Unrecognized Azure DevOps comment type*') { throw }
+        }
+        Set-Content -LiteralPath $rawCommentsPath -Encoding utf8 -Value '[{"id":11,"status":1,"comments":[{"id":1,"commentType":1}]}]'
+        try {
+            & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
+            throw 'A text comment without content was accepted.'
+        } catch {
+            if ($_.Exception.Message -notlike '*has no content*') { throw }
+        }
+        # An uncapturable discussion is recorded as incomplete, not as an empty one.
+        & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -OutputPath $snapshotPath -UnavailableReason 'MCP omitted commentType; Azure CLI is not installed.' | Out-Null
+        $unavailable = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+        if ($unavailable.capabilities.complete -ne $false -or $unavailable.source -ne 'unavailable' -or $unavailable.provider_host -ne 'dev.azure.com' -or
+            $unavailable.unavailable_reason -ne 'MCP omitted commentType; Azure CLI is not installed.' -or @($unavailable.threads).Count -ne 0 -or $unavailable.pull_request_id -ne 1234) {
+            throw 'An unavailable Azure discussion was not recorded as incomplete with its reason.'
+        }
+        & $prCommentsScript -Provider github -HostName 'github.com' -RepositoryFullName 'owner/repo' -PullRequestId 42 -OutputPath $snapshotPath -UnavailableReason 'gh is not authenticated.' | Out-Null
+        $unavailable = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+        if ($unavailable.provider -ne 'github' -or $unavailable.repository_full_name -ne 'owner/repo' -or $unavailable.capabilities.complete -ne $false) {
+            throw 'An unavailable GitHub discussion was not recorded as incomplete.'
+        }
+        try {
+            & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -OutputPath $snapshotPath -UnavailableReason ' ' | Out-Null
+            throw 'A blank unavailable reason was accepted.'
+        } catch {
+            if ($_.Exception.Message -notlike '*must describe what failed*') { throw }
+        }
         Write-JsonFile $rawCommentsPath ([ordered]@{ count = 2; value = @() })
         try {
             & $prCommentsScript -PullRequestId 1234 -OrganizationUrl 'https://dev.azure.com/example' -Project example -RepositoryId repository-id -RawResponsePath $rawCommentsPath -OutputPath $snapshotPath | Out-Null
@@ -929,6 +969,26 @@ try {
         } else {
             $script:failed++
             Write-Output "FAIL resolver-inactive-numeric-status - unexpected error: $($_.Exception.Message)"
+        }
+    }
+
+    $missingSourceCommitMetadata = $prMetadata | ConvertTo-Json -Depth 15 | ConvertFrom-Json
+    $missingSourceCommitMetadata.PSObject.Properties.Remove('lastMergeSourceCommit')
+    $missingSourceCommitMetadataPath = Join-Path $testRoot 'resolver-missing-source-commit.json'
+    Write-JsonFile $missingSourceCommitMetadataPath $missingSourceCommitMetadata
+    try {
+        Push-Location $repositoryPath
+        try { & $resolverScript -MetadataPath $missingSourceCommitMetadataPath | Out-Null }
+        finally { Pop-Location }
+        $script:failed++
+        Write-Output 'FAIL resolver-mcp-requires-source-commit - expected validation failure'
+    } catch {
+        if ($_.Exception.Message -like '*omits lastMergeSourceCommit.commitId*') {
+            $script:passed++
+            Write-Output 'PASS resolver-mcp-requires-source-commit'
+        } else {
+            $script:failed++
+            Write-Output "FAIL resolver-mcp-requires-source-commit - unexpected error: $($_.Exception.Message)"
         }
     }
 

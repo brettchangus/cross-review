@@ -63,7 +63,7 @@ Both reviewers and the comparison pass run at the selected effort, `medium` by d
 - For Azure DevOps PR reviews: Azure DevOps MCP (preferred), or authenticated Azure CLI with the `azure-devops` extension (fallback)
 - For GitHub PR reviews: capable GitHub MCP operations (preferred), or authenticated [GitHub CLI](https://cli.github.com/) (`gh`, fallback)
 
-Metadata and discussion operations are checked separately; an MCP connection that can read a PR may still need CLI fallback to capture complete discussion. Failed or incomplete requests are reported as errors.
+Metadata and discussion operations are checked separately; an MCP connection that can read a PR may still need CLI fallback to capture complete discussion. Failed or incomplete metadata requests are reported as errors. If neither MCP nor CLI can capture the discussion, the review still finishes, and the report says the discussion was not captured and why instead of implying the PR has no comments.
 
 Uncommitted and branch reviews need no provider API authentication. A remote branch comparison uses Git authentication; local main/master comparisons work without a remote.
 
@@ -190,6 +190,7 @@ The final report starts with a one- or two-paragraph summary of the reviewed cha
 - rejected false positives, merged duplicates, and uncertain findings
 - the precision of each reviewer and the value added by the second reviewer
 - the models and effort levels used, and where each value came from
+- when something unexpected went wrong, a closing `Run issues` section listing each failure, how it was worked around, what it affected, and any that look like a bug in the skill itself (runs without issues omit it)
 
 ### Metrics
 

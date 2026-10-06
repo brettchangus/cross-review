@@ -8,11 +8,62 @@ param(
     [string]$Project,
     [string]$RepositoryId,
     [Parameter(Mandatory)][string]$OutputPath,
-    [string]$RawResponsePath
+    [string]$RawResponsePath,
+    [string]$UnavailableReason
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+
+# When neither MCP nor CLI can capture the discussion, record that explicitly
+# (complete = false, with the reason) so the run can continue without the gap
+# being mistaken for a PR with no comments.
+if ($PSBoundParameters.ContainsKey('UnavailableReason')) {
+    if ([string]::IsNullOrWhiteSpace($UnavailableReason)) { throw 'UnavailableReason must describe what failed.' }
+    if ($RawResponsePath) { throw 'UnavailableReason cannot be combined with RawResponsePath.' }
+    $providerHost = if ($Provider -eq 'github') { $HostName } else {
+        if ([string]::IsNullOrWhiteSpace($OrganizationUrl)) { throw 'Azure discussion requires organization URL.' }
+        ([Uri]$OrganizationUrl).Host
+    }
+    $unavailable = [ordered]@{
+        schema_version = 1
+        provider = $Provider
+        provider_host = $providerHost
+        capabilities = [ordered]@{ complete = $false }
+        unavailable_reason = $UnavailableReason.Trim()
+        pull_request_id = $PullRequestId
+        captured_at = (Get-Date).ToUniversalTime().ToString('o')
+        source = 'unavailable'
+        threads = @()
+    }
+    if ($Provider -eq 'github') { $unavailable.repository_full_name = $RepositoryFullName }
+    $outputDirectory = Split-Path -Parent $OutputPath
+    if (-not (Test-Path -LiteralPath $outputDirectory -PathType Container)) { throw 'OutputPath parent directory does not exist.' }
+    [System.IO.File]::WriteAllText($OutputPath, ($unavailable | ConvertTo-Json -Depth 5), [System.Text.UTF8Encoding]::new($false))
+    $unavailable | ConvertTo-Json -Depth 5 -Compress
+    return
+}
+
+# The Azure DevOps MCP serializes REST enums as numbers (commentType 1 = text),
+# while the Azure CLI returns names. Normalize both, and fail on anything
+# unrecognized so a format change cannot silently empty the discussion.
+function ConvertTo-AdoEnumName {
+    param($Value, [string[]]$Names, [string]$Label)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
+    $text = ([string]$Value).Trim()
+    $index = 0
+    if ([int]::TryParse($text, [ref]$index)) {
+        if ($index -ge 0 -and $index -lt $Names.Count) { return $Names[$index] }
+    } else {
+        foreach ($name in $Names) {
+            if ([string]::Equals($name, $text, [System.StringComparison]::OrdinalIgnoreCase)) { return $name }
+        }
+    }
+    throw "Unrecognized Azure DevOps $Label '$text'."
+}
+$commentTypeNames = @('unknown', 'text', 'codeChange', 'system')
+$threadStatusNames = @('unknown', 'active', 'fixed', 'wontFix', 'closed', 'byDesign', 'pending')
+
 if ($Provider -eq 'github') {
     & (Join-Path $PSScriptRoot 'Get-GitHubPrCommentSnapshot.ps1') -PullRequestId $PullRequestId -HostName $HostName -RepositoryFullName $RepositoryFullName -OutputPath $OutputPath -RawResponsePath $RawResponsePath
     return
@@ -57,8 +108,12 @@ $threads = @(
         if ($null -eq $thread.id) { throw 'A PR comment thread has no ID.' }
         $comments = @(
             foreach ($comment in @($thread.comments)) {
-                if ($null -eq $comment -or $comment.isDeleted -eq $true -or $comment.commentType -ne 'text') { continue }
+                if ($null -eq $comment -or $comment.isDeleted -eq $true) { continue }
                 if ($null -eq $comment.id) { throw "Thread $($thread.id) has a comment without an ID." }
+                $commentType = ConvertTo-AdoEnumName $comment.commentType $commentTypeNames 'comment type'
+                if ($null -eq $commentType) { throw "Thread $($thread.id) comment $($comment.id) has no comment type." }
+                if ($commentType -ne 'text') { continue }
+                if ($null -eq $comment.content) { throw "Thread $($thread.id) comment $($comment.id) has no content." }
                 [ordered]@{
                     id = $comment.id
                     parent_comment_id = $comment.parentCommentId
@@ -66,14 +121,14 @@ $threads = @(
                     content = [string]$comment.content
                     published_at = $comment.publishedDate
                     updated_at = $comment.lastUpdatedDate
-                    type = [string]$comment.commentType
+                    type = $commentType
                 }
             }
         )
         if ($comments.Count -eq 0) { continue }
         [ordered]@{
             id = $thread.id
-            status = [string]$thread.status
+            status = [string](ConvertTo-AdoEnumName $thread.status $threadStatusNames 'thread status')
             published_at = $thread.publishedDate
             updated_at = $thread.lastUpdatedDate
             context = $thread.threadContext

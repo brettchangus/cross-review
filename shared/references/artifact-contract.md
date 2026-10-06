@@ -50,7 +50,7 @@ In PR mode, copy `pull_request.url`, `source_repository`, and `target_repository
 
 Branch targets may name any valid `refs/heads/*` or `refs/remotes/*` default branch, determined by `Resolve-ReviewBase.ps1`; main/master are only local fallbacks. The ledger validator checks ref syntax rather than restricting branch names.
 
-Discussion snapshots keep schema 1 with additive provider/host and capability fields. GitHub snapshots include conversation comments, submitted review summaries, inline review threads/replies, resolved/outdated flags, current/original locations, URLs, and commit context. IDs may be strings. Missing capability is unknown, never an inferred status. A capture is complete only after all connections and nested replies are paginated; errors cannot produce an empty snapshot. Azure retains its status and iteration context. See [provider-workflow.md](provider-workflow.md) for raw payload contracts.
+Discussion snapshots keep schema 1 with additive provider/host and capability fields. GitHub snapshots include conversation comments, submitted review summaries, inline review threads/replies, resolved/outdated flags, current/original locations, URLs, and commit context. IDs may be strings. Missing capability is unknown, never an inferred status. A capture is complete only after all connections and nested replies are paginated; errors cannot produce an empty snapshot. When neither MCP nor CLI can capture the discussion, the snapshot instead records `capabilities.complete: false`, `source: unavailable`, an `unavailable_reason`, and no threads; the run continues and the report says the discussion was not captured. Azure retains its status and iteration context. See [provider-workflow.md](provider-workflow.md) for raw payload contracts.
 
 ## run-context.json
 
@@ -226,6 +226,16 @@ Cross-review reduction:  <percent or N/A>
 ```
 
 Display ratios as percentages rounded to one decimal place, and any null metric as `N/A`. The calculations are deterministic once the ledger is valid, but severity normalization, grouping, and adjudication remain model judgments: precision describes confirmation by this pipeline, not an objective ranking of Claude against Codex.
+
+## Run issues
+
+When the run had any, end `<run_directory>/final.md` and the final chat output with a `Run issues` section. List every unexpected failure or deviation from the documented workflow, in run order, from any stage including the reviewer and comparison children. For example: a failed, retried, or timed-out command or tool call; an MCP-to-CLI fallback; a permission denial; a provider response with an unexpected shape; a step that was skipped or degraded, such as a discussion recorded as unavailable; and cleanup warnings. For each, give:
+
+- **What happened:** the stage, the command or tool, and the error or symptom.
+- **Workaround:** what was done instead, or `none` if the run accepted the gap.
+- **Effect:** what the result is missing or how it may differ. Say plainly when the agent changed, mapped, or rewrote data by hand (for example, converting numeric enum values before a script would accept them).
+
+Flag anything that looks like a defect in the skill or its scripts as a likely skill bug, naming the file, so it can be fixed rather than worked around again. Expected outcomes are not issues: no PR found, nothing to review, or a declined confirmation. With nothing to report, omit the section entirely: no heading, no `none` line, and no mention that the run had no issues. Problems that occur after `final.md` is written, such as history append or worktree cleanup, go in the chat output only. A run that stops early ends its stop message with the same list.
 
 ## Version 4: Codex-led workflow
 
