@@ -262,6 +262,11 @@ try {
         Expect-Failure { & $builder -Stage independent -WorkingDirectory $testRoot -ReviewMode uncommitted -BaseCommit ('a' * 40) -AllowedToolsPath $allowedToolsPath } 'must be omitted'
         [IO.File]::WriteAllText((Join-Path $scopeRepo 'unrelated.txt'), 'Uncommitted source')
         Expect-Failure { & $builder -Stage independent -WorkingDirectory $scopeRepo -ReviewMode branch -BaseCommit $scopeBase -AllowedToolsPath $allowedToolsPath } 'requires a clean workspace'
+        foreach ($mode in @('branch', 'pull_request')) {
+            $combined = & $builder -Stage independent -WorkingDirectory $scopeRepo -ReviewMode $mode -BaseCommit $scopeBase -IncludeLocalChanges -AllowedToolsPath $allowedToolsPath | ConvertFrom-Json
+            if (-not $combined.standard_input.Contains('git diff <merge-base> (without ...HEAD)') -or
+                -not $combined.standard_input.Contains('including all staged local changes')) { throw 'Combined scope omitted local changes.' }
+        }
     }
     Test-Case 'claude-comparison-inputs' {
         $inputPaths = @('claude.md', 'codex.md', 'context.json', 'pr-comments.json') | ForEach-Object { Join-Path $testRoot $_ }

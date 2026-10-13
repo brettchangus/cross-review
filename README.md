@@ -109,6 +109,7 @@ In Claude Code:
 ```text
 /cross-review
 /cross-review pr 1234
+/cross-review --debug
 /cross-review --effort high
 /cross-review pr 1234 --effort xhigh
 /cross-review pr https://github.com/owner/repo/pull/1234
@@ -119,6 +120,7 @@ In Codex:
 ```text
 $cross-review
 $cross-review pr 1234
+$cross-review --debug
 $cross-review --effort high
 $cross-review pr 1234 --effort xhigh
 $cross-review pr https://github.com/owner/repo/pull/1234
@@ -138,13 +140,15 @@ A pull request must match your exact checked-out branch and validated local repo
 
 Provider detection uses the branch tracking remote, then origin, then a sole remote. Ambiguous remotes stop. GitHub HTTPS and SSH URLs are recognized; configure `GH_HOST` for GitHub Enterprise. Unknown providers and repositories without a remote retain local review support.
 
-Every preflight shows `Repository provider: GitHub (github.com)`, `Azure DevOps (<host>)`, `Unknown (<host or local remote>)`, or `Local Git (no remote)`, independently of whether PR lookup ran. PR metadata separately shows MCP/CLI and any fallback reason. Provider and host are also saved in artifacts and shown in the final report.
+With `--debug`, preflight shows `Repository provider: GitHub (github.com)`, `Azure DevOps (<host>)`, `Unknown (<host or local remote>)`, or `Local Git (no remote)`, independently of whether PR lookup ran. PR metadata separately shows MCP/CLI and any fallback reason. Provider and host are also included in the saved report's `Provenance` section and structured run artifacts.
 
 Use `--effort low|medium|high|xhigh` to set the two independent reviewers and comparison pass. The default is `medium`. The option can appear before or after `pr <id>`. It does not change the effort of the already-running Claude or Codex session that makes the final decisions; the preflight shows that session's effort when available. Model or organization limits may cap a requested level, so any reported fallback is disclosed in the result.
 
+Add `--debug` to include the diagnostic `Run issues` section in the saved report and chat output, including early stop messages. It defaults to off and can appear anywhere alongside the other options. Blocking errors and material review limitations are still reported.
+
 ### Confirming a run
 
-Before anything runs, the skill shows a complete preflight and asks for confirmation. The preflight covers the scope, source and target commits, tools, models and effort levels, review size, and estimated duration. Only `y` or `yes` continues. Any other answer, including cancelling, stops without creating any files, worktrees, or history.
+Before anything runs, the skill shows a complete preflight and asks for confirmation. Preflight leads with **Repo**, **Branch**, and **Review Scope**, in that order. For PR reviews, Review Scope includes the PR number, such as `Pull request #1234`, in both preflight and saved provenance. These fields receive more emphasis than model settings. It also shows tools, the models and effort levels used and where each value came from, review size, and estimated duration. Other scope and revision details (PR, provider/host, source/target refs and commits, metadata access, and workspace) appear in preflight only with `--debug`, and always remain in the saved report and structured artifacts. Only `y` or `yes` continues. Any other answer, including cancelling, stops without creating any files, worktrees, or history.
 
 Claude Code displays an interactive Yes/No selector. Codex displays the preflight in chat and uses a short inline Yes/No question only when the host permits a blocking input tool for approval in the active mode. When that tool is unavailable, restricted, or fails, Codex asks you to reply yes or no in chat. It does not use queued asynchronous follow-up questions for confirmation. A skill cannot change how Codex renders input tools, and printing Yes/No bullets does not create a selector.
 
@@ -181,7 +185,7 @@ The skill adds `/.reviews/` and `/.claude/worktrees/` to the repository's local 
 
 ### Report contents
 
-The final report starts with a one- or two-paragraph summary of the reviewed changes, emphasizing any critical or breaking behavior before the findings. It then lists every confirmed finding with its severity, plus:
+Both the saved report and chat output start with `Cross-review effectiveness`, followed immediately by `Summary` and `Confirmed Findings`. The summary describes the reviewed changes in one or two paragraphs, emphasizing critical or breaking behavior; the findings number every confirmed issue with its severity and put its suggested fix beneath the issue description. Supporting sections follow the confirmed findings. The saved report includes a `Provenance` section after the findings and supporting sections, with **Repo**, **Branch**, and **Review Scope** first, followed by PR, identifiers, provider/host, refs and commits, model/effort settings and their sources, review size, and estimates. All provenance details are saved regardless of `--debug`; source/target details receive secondary emphasis and model/effort text uses the same regular size and weight as other supporting information. Chat output omits `Provenance`, including with `--debug`, to keep the focus on findings. This information also remains in preflight and structured run artifacts. The effectiveness block includes:
 
 - total run time in the cross-review effectiveness block
 - initial Claude and Codex finding counts by severity
@@ -189,8 +193,8 @@ The final report starts with a one- or two-paragraph summary of the reviewed cha
 - agreed, Claude-only, and Codex-only confirmed findings
 - rejected false positives, merged duplicates, and uncertain findings
 - the precision of each reviewer and the value added by the second reviewer
-- the models and effort levels used, and where each value came from
-- when something unexpected went wrong, a closing `Run issues` section listing each failure, how it was worked around, what it affected, and any that look like a bug in the skill itself (runs without issues omit it)
+
+With `--debug` set, a closing `Run issues` section lists unexpected failures, workarounds, their effects, and likely skill bugs. Runs without issues omit it.
 
 ### Metrics
 
@@ -239,14 +243,14 @@ PR metadata comes from the detected provider's MCP operations, with Azure CLI or
 
 GitHub resolution validates target and source repository identities, including forks. Source is fetched through the target repository's PR head ref; target is the actual base branch. The fetched source commit is checked against metadata before preflight; moved PRs get a bounded metadata refresh/retry. For both providers the freshly fetched target is authoritative, because neither reports the current base-branch tip.
 
-PR lookup is skipped when uncommitted changes take precedence and for unsupported providers/no remote. The shared [provider workflow](shared/references/provider-workflow.md) describes detection, raw MCP contracts, pagination, fetching, and discussion normalization.
+PR lookup runs even when local changes exist; it is skipped for unsupported providers/no remote. Branch and PR reviews include committed changes together with staged, unstaged, and untracked local edits. Uncommitted-only review applies on the default branch or when an unsupported/no-remote repository has no resolvable branch base. The shared [provider workflow](shared/references/provider-workflow.md) describes detection, raw MCP contracts, pagination, fetching, and discussion normalization.
 
 </details>
 
 <details>
 <summary>Review workspace</summary>
 
-PR and branch reviews run against the exact source commit from the preflight. If your checkout is clean and already at that commit, which is the usual case when you have pulled a PR branch, the review runs in place. Otherwise the skill creates a temporary detached worktree under `.claude/worktrees/`, so your local changes and later commits cannot affect the review.
+PR and branch reviews run against the exact source commit from the preflight. If your checkout is clean and already at that commit, which is the usual case when you have pulled a PR branch, the review runs in place. When local edits exist, the review uses local HEAD (which must contain the PR head for a PR review) and freezes those edits in a detached worktree using a temporary index. Both reviewers see the branch diff plus the local overlay, including new files. The original checkout and index stay unchanged, and no snapshot commit is created. Clean checkouts on a different source commit use a detached worktree at that commit.
 
 The worktree is kept until adjudication finishes, so every source check sees the reviewed commit. It is then removed, along with all temporary review data, whether the run succeeds or fails. The cleanup script only touches that exact worktree path and reports anything it deliberately left in place.
 

@@ -4,6 +4,7 @@ param([string[]]$ReviewArguments = @())
 $ErrorActionPreference = 'Stop'
 $effort = 'medium'
 $effortSeen = $false
+$debug = $false
 $pullRequestId = $null
 $prUrl = $null
 . (Join-Path $PSScriptRoot 'ReviewProvider.ps1')
@@ -24,6 +25,10 @@ for ($index = 0; $index -lt $ReviewArguments.Count; $index++) {
                 $pullRequestId = $parsedId
             }
         }
+        '--debug' {
+            if ($debug) { throw 'Expected --debug at most once.' }
+            $debug = $true
+        }
         '--effort' {
             if ($effortSeen -or $index + 1 -ge $ReviewArguments.Count) { throw 'Expected exactly one value after --effort.' }
             $index++
@@ -35,4 +40,4 @@ for ($index = 0; $index -lt $ReviewArguments.Count; $index++) {
         default { throw "Unknown cross-review argument: $token" }
     }
 }
-[ordered]@{ pull_request_id = $pullRequestId; pr_url = $prUrl; effort = $effort; effort_source = 'explicit' } | ConvertTo-Json -Compress
+[ordered]@{ pull_request_id = $pullRequestId; pr_url = $prUrl; effort = $effort; effort_source = 'explicit'; debug = $debug } | ConvertTo-Json -Compress

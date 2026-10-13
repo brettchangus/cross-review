@@ -7,7 +7,7 @@ relative to the installed skill directory. Keep PR lookup and comments read-only
 ## Local identity and selection
 
 Parse arguments with `Resolve-ReviewArguments.ps1`. It accepts `pr <number>` or
-`pr <GitHub-PR-URL>` and the existing effort option. Retain `pr_url` alongside the
+`pr <GitHub-PR-URL>`, the effort option, and `--debug`. Retain `pr_url` alongside the
 number; pass `-PrUrl <url>` to the resolver whenever it is present.
 
 Use `Resolve-ReviewPr.ps1 -LocalOnly` for local identity. It reports `provider`
@@ -35,9 +35,11 @@ propagate that argument to subsequent resolver/scope calls. An arbitrary two-par
 remote URL does not prove it is GitHub. Unknown and no-remote repositories remain
 eligible for uncommitted and branch review without provider CLI authentication.
 
-Preserve scope precedence: explicit PR, uncommitted changes, discovered PR,
-branch comparison, nothing to review. Discover PRs only for supported providers;
-skip lookup when local changes take precedence. Do not turn an authentication or
+Select the base scope: explicit PR, discovered PR, then branch comparison.
+Local staged, unstaged, and untracked edits extend PR/branch scope; they never
+suppress discovery. Use uncommitted-only scope on the default branch or when an
+unsupported/no-remote repository has no resolvable branch base. Discover PRs
+only for supported providers. Do not turn an authentication or
 API failure into a zero-result lookup or silently fall through to branch review.
 
 ## PR metadata
@@ -137,7 +139,7 @@ any later setup operation; those retain their existing permission requirements.
 
 ## Preflight and saved identity
 
-Show a separate line immediately after review scope in every preflight:
+Lead every preflight with bold Repo, Branch, and Review Scope fields, in that order. In PR mode, include the PR number in Review Scope (`Pull request #<id>`) even without `--debug`. Only with `--debug`, show the additional provider line:
 
 ```text
 Repository provider: GitHub (github.com)
@@ -147,8 +149,8 @@ Repository provider: Local Git (no remote)
 ```
 
 Choose one line using detected identity, including uncommitted and branch modes.
-Show `Repository: <host/owner/repo>` for GitHub or Azure organization/project/repo.
-Show source and target repository identities for fork PRs alongside their refs
+Always show `Repo: <host/owner/repo>` for GitHub or Azure organization/project/repo.
+Only with `--debug`, show PR identity, workspace, and source and target repository identities for fork PRs alongside their refs
 and frozen commits. Separately show `PR metadata: <provider> MCP` or
 `<provider> CLI (fallback: <reason>)`; disclose no-match, skipped-by-precedence,
 or unsupported/no-remote lookup as appropriate. This is detection information,
@@ -158,7 +160,7 @@ Copy `repository.provider`, `repository.host`, and GitHub `repository.owner`
 into run-context and adjudication; include PR URL, `source_repository`, and
 `target_repository` in both PR scope objects. Preserve legacy Azure project
 fields. Record metadata access separately in tooling. Show provider and host
-in the final report as well. Follow the artifact contract for compatibility.
+in debug preflight and always in the saved report; retain them in structured run artifacts. Follow the artifact contract for compatibility.
 
 ## Discussion snapshot
 

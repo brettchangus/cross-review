@@ -10,6 +10,8 @@ param(
     [ValidateSet('pull_request', 'uncommitted', 'branch')]
     [string]$ReviewMode = 'pull_request',
 
+    [switch]$IncludeLocalChanges,
+
     [Parameter()]
     [string]$HistoryPath = '.reviews/history.jsonl',
 
@@ -113,6 +115,11 @@ if ($ReviewMode -eq 'uncommitted' -and $PSBoundParameters.ContainsKey('HeadRef')
 $repositoryRoot = Invoke-GitText @('rev-parse', '--show-toplevel') 'Cannot resolve the repository root.'
 $effectiveHeadRef = if ($ReviewMode -eq 'uncommitted') { 'HEAD' } else { $HeadRef }
 $headCommit = Invoke-GitText @('-C', $repositoryRoot, 'rev-parse', '--verify', "$effectiveHeadRef^{commit}") "Cannot resolve review source '$effectiveHeadRef'."
+if ($IncludeLocalChanges) {
+    if ($ReviewMode -eq 'uncommitted') { throw 'IncludeLocalChanges requires PR or branch mode.' }
+    $localHead = Invoke-GitText @('-C', $repositoryRoot, 'rev-parse', 'HEAD') 'Cannot resolve local HEAD.'
+    if ($headCommit -ne $localHead) { throw 'Combined review source must equal local HEAD.' }
+}
 $baseCommit = if ($ReviewMode -eq 'uncommitted') {
     $headCommit
 } else {
@@ -121,6 +128,9 @@ $baseCommit = if ($ReviewMode -eq 'uncommitted') {
 
 $diffArguments = if ($ReviewMode -eq 'uncommitted') {
     @('-C', $repositoryRoot, 'diff', '--numstat', 'HEAD', '--', '.', ':(exclude).reviews/**')
+} elseif ($IncludeLocalChanges) {
+    $mergeBase = Invoke-GitText @('-C', $repositoryRoot, 'merge-base', $baseCommit, $headCommit) 'Cannot resolve the review merge base.'
+    @('-C', $repositoryRoot, 'diff', '--numstat', $mergeBase, '--', '.', ':(exclude).reviews/**', ':(exclude).claude/worktrees/**')
 } else {
     @('-C', $repositoryRoot, 'diff', '--numstat', "$baseCommit...$headCommit", '--', '.', ':(exclude).reviews/**')
 }
@@ -148,8 +158,8 @@ foreach ($line in $numstat) {
     $linesDeleted += [int64]$parts[1]
 }
 
-if ($ReviewMode -eq 'uncommitted') {
-    $untrackedOutput = @(& git -C $repositoryRoot -c core.quotepath=false ls-files --full-name --others --exclude-standard -- '.' ':(exclude).reviews/**' 2>&1)
+if ($ReviewMode -eq 'uncommitted' -or $IncludeLocalChanges) {
+    $untrackedOutput = @(& git -C $repositoryRoot -c core.quotepath=false ls-files --full-name --others --exclude-standard -- '.' ':(exclude).reviews/**' ':(exclude).claude/worktrees/**' 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw "Cannot enumerate untracked files: $($untrackedOutput -join [Environment]::NewLine)"
     }
@@ -296,6 +306,7 @@ if ($nearest.Count -eq 0) {
 $result = [ordered]@{
     schema_version = 3
     review_mode = $ReviewMode
+    includes_local_changes = [bool]$IncludeLocalChanges
     measured_at = [DateTime]::UtcNow.ToString('o')
     base_ref = $BaseRef
     head_ref = $effectiveHeadRef

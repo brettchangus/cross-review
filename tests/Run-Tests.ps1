@@ -233,9 +233,24 @@ try {
             $reversedArguments.effort -ne 'low' -or $reversedArguments.pull_request_id -ne 42) {
             throw 'Review argument parsing returned the wrong scope or effort.'
         }
+        $debugOnly = & $argumentsScript -ReviewArguments @('--debug') | ConvertFrom-Json
+        if ($defaultArguments.debug -isnot [bool] -or $defaultArguments.debug -or
+            $debugOnly.debug -ne $true -or $debugOnly.effort -ne 'medium' -or $null -ne $debugOnly.pull_request_id) {
+            throw 'Debug must default to false and be enabled by --debug without changing scope or effort.'
+        }
+        foreach ($tokens in @(
+            @('--debug', 'pr', '1234', '--effort', 'high'),
+            @('pr', '1234', '--debug', '--effort', 'high'),
+            @('pr', '1234', '--effort', 'high', '--debug')
+        )) {
+            $debugArguments = & $argumentsScript -ReviewArguments $tokens | ConvertFrom-Json
+            if ($debugArguments.debug -ne $true -or $debugArguments.pull_request_id -ne 1234 -or $debugArguments.effort -ne 'high') {
+                throw 'Debug parsing must compose with PR and effort arguments in any order.'
+            }
+        }
         foreach ($invalid in @(
             @('--effort', 'max'), @('--effort', 'high', '--effort', 'low'),
-            @('pr', '0'), @('pr', '12', 'pr', '13'), @('--unknown')
+            @('pr', '0'), @('pr', '12', 'pr', '13'), @('--unknown'), @('--debug', '--debug'), @('--debug', 'true')
         )) {
             try {
                 & $argumentsScript -ReviewArguments $invalid | Out-Null
@@ -1537,6 +1552,42 @@ try {
     } catch {
         $script:failed++
         Write-Output "FAIL estimate-uncommitted-scope - $($_.Exception.Message)"
+    }
+
+    try {
+        $snapshotPath = Join-Path $testRoot 'combined workspace'
+        $originalHead = Invoke-TestGit $repositoryPath @('rev-parse', 'HEAD')
+        $originalStatus = (Invoke-TestGit $repositoryPath @('status', '--porcelain=v1', '--untracked-files=all')) -join "`n"
+        $originalIndex = Invoke-TestGit $repositoryPath @('write-tree')
+        Push-Location $repositoryPath
+        try {
+            foreach ($mode in @('branch', 'pull_request')) {
+                $combined = & $estimateScript -ReviewMode $mode -BaseRef main -HeadRef HEAD -IncludeLocalChanges | ConvertFrom-Json
+                if (-not $combined.includes_local_changes -or $combined.review_size.changed_files -ne 4 -or $combined.review_size.commit_count -ne 1) {
+                    throw "Combined $mode estimate omitted committed or local changes."
+                }
+            }
+        } finally { Pop-Location }
+        $snapshot = & (Join-Path $skillDirectory 'scripts/New-ReviewLocalWorkspace.ps1') -RepositoryPath $repositoryPath -WorktreePath $snapshotPath -SourceCommit $originalHead | ConvertFrom-Json
+        $mergeBase = Invoke-TestGit $snapshotPath @('merge-base', 'main', 'HEAD')
+        $snapshotFiles = (Invoke-TestGit $snapshotPath @('diff', '--name-only', $mergeBase)) -split '\r?\n'
+        if ($snapshotFiles.Count -ne 4 -or $snapshotFiles -notcontains 'untracked.txt' -or
+            (Invoke-TestGit $snapshotPath @('write-tree')) -ne $snapshot.local_tree) { throw 'Snapshot omitted changes or included bookkeeping.' }
+        if ((Invoke-TestGit $repositoryPath @('rev-parse', 'HEAD')) -ne $originalHead -or
+            (Invoke-TestGit $repositoryPath @('write-tree')) -ne $originalIndex -or
+            ((Invoke-TestGit $repositoryPath @('status', '--porcelain=v1', '--untracked-files=all')) -join "`n") -ne $originalStatus) { throw 'Snapshot changed the original checkout or index.' }
+        [IO.File]::AppendAllText((Join-Path $repositoryPath 'untracked.txt'), "later edit`n")
+        if ([IO.File]::ReadAllText((Join-Path $snapshotPath 'untracked.txt')).Replace("`r`n", "`n") -ne "one`ntwo`n") { throw 'Snapshot was not frozen.' }
+        [IO.File]::WriteAllText((Join-Path $repositoryPath 'untracked.txt'), "one`ntwo`n", [Text.UTF8Encoding]::new($false))
+        $script:passed++
+        Write-Output 'PASS combined-branch-pr-local-scope'
+    } catch {
+        $script:failed++
+        Write-Output "FAIL combined-branch-pr-local-scope - $($_.Exception.Message)"
+    } finally {
+        if ($snapshotPath -and (Test-Path -LiteralPath $snapshotPath)) {
+            & (Join-Path $skillDirectory 'scripts/Remove-ReviewWorkspace.ps1') -RepositoryPath $repositoryPath -WorktreePath $snapshotPath | Out-Null
+        }
     }
 
     try {
