@@ -139,7 +139,7 @@ any later setup operation; those retain their existing permission requirements.
 
 ## Preflight and saved identity
 
-Lead every preflight with bold Repo, Branch, and Review Scope fields, in that order. In PR mode, include the PR number in Review Scope (`Pull request #<id>`) even without `--debug`. Only with `--debug`, show the additional provider line:
+Lead every preflight with bold Repo, Branch, and Review Scope fields, in that order. In PR mode, include the PR number in Review Scope (`Pull request #<id>`) even without `--debug`. In branch mode, use `Compare <source-branch> vs <target-branch>` in preflight and saved provenance even without `--debug`. Derive the names from the frozen source and target refs, removing only a leading `refs/heads/` for display and preserving branch-name slashes. Name the actual resolved target, never assume `main`; examples are `Compare feature/example vs develop` and `Compare feature/example vs main`. Append ` + uncommitted local changes` when applicable. Only with `--debug`, show the additional provider line:
 
 ```text
 Repository provider: GitHub (github.com)
