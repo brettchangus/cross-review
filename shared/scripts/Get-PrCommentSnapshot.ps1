@@ -1,3 +1,4 @@
+#requires -Version 7.4
 [CmdletBinding()]
 param(
     [ValidateSet('azure_devops', 'github')][string]$Provider = 'azure_devops',

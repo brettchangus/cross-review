@@ -1,8 +1,9 @@
+#requires -Version 7.4
 # Shared read-only Git and repository identity helpers. Dot-source this file.
 function Invoke-ReviewGit {
     param([string[]]$Arguments, [switch]$Optional, [string]$FailureMessage)
-    # Windows PowerShell treats redirected native stderr as ErrorRecords. Capture
-    # those diagnostics without aborting before the native exit code is checked.
+    # Redirected native stderr arrives as ErrorRecords. Capture those diagnostics
+    # without aborting before the native exit code is checked.
     $previousPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -104,11 +105,8 @@ function Invoke-ReviewGhJson {
     $response = @(& gh @Arguments 2>&1)
     if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI request failed; check authentication and repository access.' }
     try {
-        # Wrap the JSON so Windows PowerShell preserves empty/nested arrays;
-        # its default ConvertFrom-Json output enumerates top-level arrays.
         $json = ($response | ForEach-Object { [string]$_ }) -join "`n"
-        $envelope = ('{"payload":' + $json + '}') | ConvertFrom-Json
-        return ,($envelope.payload)
+        return ,($json | ConvertFrom-Json -NoEnumerate)
     }
     catch { throw 'GitHub CLI returned invalid JSON.' }
 }

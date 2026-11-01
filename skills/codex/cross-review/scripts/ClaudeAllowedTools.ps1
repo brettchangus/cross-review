@@ -1,3 +1,4 @@
+#requires -Version 7.4
 function Get-ClaudeAllowedToolsPath {
     param([string]$Path)
 

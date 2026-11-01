@@ -1,3 +1,4 @@
+#requires -Version 7.4
 [CmdletBinding(DefaultParameterSetName = 'Cli')]
 param(
     [Parameter(ParameterSetName = 'Cli')]

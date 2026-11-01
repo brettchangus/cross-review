@@ -1,3 +1,4 @@
+#requires -Version 7.4
 [CmdletBinding()]
 param(
     [Parameter()]
@@ -80,6 +81,8 @@ $runFiles = @(
     'claude-evaluation.md',
     'adjudication.json',
     'metrics.json',
+    'timing-input.json',
+    'timing.json',
     'final.md'
 )
 

@@ -1,3 +1,4 @@
+#requires -Version 7.4
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateRange(1, [int]::MaxValue)][int]$PullRequestId,

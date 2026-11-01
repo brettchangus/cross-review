@@ -43,12 +43,14 @@ There are two implementations with the same workflow. They differ in which tool 
 Select the review scope
   -> show the complete preflight and ask for confirmation
   -> Claude /code-review and Codex review, independently and concurrently
-  -> comparison pass by the non-host model
+  -> comparison pass and reuse check by the non-host model
   -> source verification and final adjudication by the host
   -> deterministic metrics, final report, and history
 ```
 
-The two reviews start before either has written any findings, so neither can see the other's output. The comparison pass groups what the reviewers found and checks each group with targeted reads of the relevant source; it does not re-review the diff. The host then makes the final call on each finding from the source.
+The two reviews start before either has written any findings, so neither can see the other's output. The comparison pass groups what the reviewers found and checks each group with targeted reads of the relevant source; it does not re-review the diff for new bugs. The host then makes the final call on each finding from the source.
+
+The comparison pass also runs a reuse check: it reads the changed lines and searches the repository for existing helpers and patterns the change should have used instead of adding its own logic. The host verifies each proposal against both the new code and the existing code, and lists the survivors under `Reuse of existing code`. Confirmed replacements must preserve behavior without changing the existing helper's contract or visibility; proposals needing further evidence or refactoring are marked uncertain. A brief coverage line distinguishes a completed check from incomplete searches. Because the check runs after both reviews are visible, those issues do not count toward either model's effectiveness metrics.
 
 For PR reviews, the skill captures existing text comment threads after the independent reviews finish. The comparison pass matches them to model findings and checks comment-only concerns against the frozen source. The final report identifies findings already discussed on the PR and lists verified comment-only issues under `Existing PR discussion`. Those issues do not count toward either model's effectiveness metrics. PR comment retrieval uses a capable provider MCP operation or its authenticated CLI fallback. GitHub capture includes conversation comments, review summaries, inline threads, and all replies, retaining resolved/outdated state and current/original locations.
 
@@ -59,7 +61,7 @@ Both reviewers and the comparison pass run at the selected effort, `medium` by d
 - [Claude Code](https://code.claude.com) with the native `/code-review` skill
 - [Codex CLI](https://learn.chatgpt.com/docs/non-interactive-mode) with `codex exec review`
 - Git
-- PowerShell 5.1 or later for the Claude-led skill; PowerShell 7.4 or later (`pwsh`) for the Codex-led skill
+- PowerShell 7.4 or later (`pwsh`) for both skills and the installer; Windows PowerShell 5.1 is not supported
 - For Azure DevOps PR reviews: Azure DevOps MCP (preferred), or authenticated Azure CLI with the `azure-devops` extension (fallback)
 - For GitHub PR reviews: capable GitHub MCP operations (preferred), or authenticated [GitHub CLI](https://cli.github.com/) (`gh`, fallback)
 
@@ -130,11 +132,11 @@ $cross-review pr https://github.com/owner/repo/pull/1234
 
 With no arguments, the skill reviews the first of these that applies:
 
-1. Uncommitted changes (staged, unstaged, or untracked) against `HEAD`
-2. The active/open Azure DevOps or GitHub pull request for the current source repository and branch
-3. The current branch against the repository's actual default branch (any valid name; main/master are local fallbacks)
+1. The active/open Azure DevOps or GitHub pull request for the current source repository and branch
+2. The current branch against the repository's actual default branch (any valid name; main/master are local fallbacks)
+3. Uncommitted changes (staged, unstaged, or untracked) against `HEAD`, when on the default branch or when an unsupported or no-remote repository has no resolvable branch base
 
-If none applies, there is nothing to review. Passing `pr <id>` reviews that pull request ahead of everything else.
+Staged, unstaged, and untracked local edits extend a pull request or branch scope; they do not replace it. If none applies, there is nothing to review. Passing `pr <id>` reviews that pull request ahead of everything else.
 
 A pull request must match your exact checked-out branch and validated local repository identities. GitHub forks are supported: the source remote identifies the fork, and an explicit PR URL can select the target repository's local upstream remote. The skill never switches your branch.
 
@@ -171,6 +173,8 @@ Each run gets its own folder under `.reviews/runs/` in the reviewed repository. 
       codex-evaluation.md           comparison pass (claude-evaluation.md for Codex-led)
       adjudication.json             final decision on every finding
       metrics.json                  calculated metrics
+      timing-input.json             observed stage boundaries
+      timing.json                   calculated stage durations
       final.md                      final report
 ```
 
@@ -278,7 +282,7 @@ Review size counts changed files, added and deleted lines, commits, and binary f
 
 The first run uses a fixed estimate of 4, 6, 8, or 10 minutes for small through very large reviews. After that, estimates blend in up to seven past runs of the same review mode, preferring runs from the same repository and ignoring runs more than about 7.4 times larger or smaller. History carries about 11% of the weight with one sample, rising to 80% with seven.
 
-Timing starts when you confirm, so time spent reading the preflight is not counted. The effectiveness summary shows total run time through final-report generation; history timing ends when the run is recorded. Runs longer than four hours are recorded but not used for estimates.
+Timing starts when you confirm, so time spent reading the preflight is not counted. The effectiveness summary in both the saved report and chat shows total run time through the report cutoff, plus preparation, each independent review, PR discussion capture, comparison, a separate reuse-check duration within comparison, and adjudication/report preparation. It shows the independent reviews' elapsed wall window and actual overlap rather than adding their durations. Missing measurements are labeled unavailable. Observed stage boundaries and calculated durations are saved in `timing-input.json` and `timing.json`; history timing still ends when the run is recorded. Runs longer than four hours are recorded but not used for estimates.
 
 </details>
 
@@ -323,7 +327,7 @@ The tests have no external dependencies. They build a temporary installation and
 ./tests/Run-Tests.ps1
 ```
 
-This also runs the Codex-led tests when you are on PowerShell 7.4 or later.
+This also runs the provider and Codex-led tests. Run it with PowerShell 7.4 or later.
 
 ## License
 

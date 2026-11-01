@@ -1,3 +1,4 @@
+#requires -Version 7.4
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
@@ -384,6 +385,7 @@ try {
         foreach ($hostSkill in @($installed, $codexInstall)) {
             $text = Get-Content (Join-Path $hostSkill 'SKILL.md') -Raw
             if ($text -notmatch 'Repository provider:' -or $text -notmatch 'provider-workflow.md' -or !(Test-Path (Join-Path $hostSkill 'scripts/Resolve-GitHubPr.ps1'))) { throw 'Installed host lacks provider workflow/preflight.' }
+            if ($text -notmatch 'prompts/reuse-check.md' -or !(Test-Path (Join-Path $hostSkill 'prompts/reuse-check.md'))) { throw 'Installed host lacks the shared reuse check.' }
         }
     }
     Case 'default-branch-and-pr-fetch-consistency' {

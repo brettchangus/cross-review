@@ -1,3 +1,4 @@
+#requires -Version 7.4
 function Get-ReviewCodexHome {
     if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
         return $env:CODEX_HOME

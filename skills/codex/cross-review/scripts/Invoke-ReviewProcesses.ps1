@@ -47,6 +47,17 @@ function Close-OutputCapture([object]$Job, [bool]$Force) {
 
 function Complete-ReviewJob([object]$Job, [bool]$ForceCapture) {
     Close-OutputCapture -Job $Job -Force $ForceCapture
+    # Lost timing renders as unavailable; it must not fail a finished review.
+    try {
+        $timing = [ordered]@{
+            started_at_unix_ms = ([DateTimeOffset]$Job.process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()
+            completed_at_unix_ms = ([DateTimeOffset]$Job.process.ExitTime.ToUniversalTime()).ToUnixTimeMilliseconds()
+            exit_code = $Job.process.ExitCode
+        }
+        [IO.File]::WriteAllText($Job.path + '.timing.json', ($timing | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+    } catch {
+        Write-Warning "Could not save review timing for PID $($Job.process.Id): $($_.Exception.Message)"
+    }
     $Job.saved = $true
     if ($ForceCapture) {
         Write-Warning "Reviewer PID $($Job.process.Id) exited, but a descendant kept an output pipe open. Preserved captured output and stopped waiting for EOF."

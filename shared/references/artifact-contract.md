@@ -4,9 +4,10 @@ Use this contract for the artifacts you write by hand. The version-3 examples de
 
 - `<run_directory>/run-context.json`
 - `<run_directory>/adjudication.json`
+- `<run_directory>/timing-input.json`
 - the final-report presentation and effectiveness summary in `<run_directory>/final.md`
 
-`metrics.json` and the history files are produced by the bundled scripts. Never hand-write or edit them.
+`metrics.json`, `timing.json`, and the history files are produced by the bundled scripts. Never hand-write or edit them.
 
 ## Storage layout
 
@@ -26,6 +27,8 @@ Every run writes into its own folder under `.reviews/runs/`. Only the history fi
       claude-evaluation.md      Codex-led comparison
       adjudication.json
       metrics.json
+      timing-input.json        observed host stage boundaries
+      timing.json              calculated durations and report text
       final.md
 ```
 
@@ -124,7 +127,17 @@ Normalize each initial severity to `high`, `medium`, or `low`. Map `critical` or
 
 ## Finding locations
 
-Every finding, wherever it appears, carries a `Location:` line giving repository-relative file paths with line numbers, as `path/to/File.cs:42` or a range `path/to/File.cs:42-57`. This covers the initial review artifacts, the comparison's groups, and every confirmed, uncertain, and rejected entry in `final.md` and the chat report. Never use an absolute or worktree path, because the review worktree is deleted after the run. When a reviewer reports only an absolute path, convert it to repository-relative. When it omits the path or line, look up the location in the review workspace before writing the artifact. List each location that matters to the issue (the defect site first, then the callers, triggers, or duplicates that make it a defect), separated by `;`. Mark a finding about whole files as `(whole file)` and list every file. Line numbers refer to the reviewed source commit plus any local overlay, never the target branch. Check them against the review workspace during adjudication and correct any that drifted. A finding cannot be reported without a verified location. Comment-only issues under `Existing PR discussion` follow the same rule.
+Every finding, wherever it appears, carries a `Location:` line giving repository-relative file paths with line numbers, as `path/to/File.cs:42` or a range `path/to/File.cs:42-57`. This covers the initial review artifacts, the comparison's groups, and every confirmed, uncertain, and rejected entry in `final.md` and the chat report. Never use an absolute or worktree path, because the review worktree is deleted after the run. When a reviewer reports only an absolute path, convert it to repository-relative. When it omits the path or line, look up the location in the review workspace before writing the artifact. List each location that matters to the issue (the defect site first, then the callers, triggers, or duplicates that make it a defect), separated by `;`. Mark a finding about whole files as `(whole file)` and list every file. Line numbers refer to the reviewed source commit plus any local overlay, never the target branch. Check them against the review workspace during adjudication and correct any that drifted. A finding cannot be reported without a verified location. Comment-only issues under `Existing PR discussion` and reuse issues under `Reuse of existing code` follow the same rule.
+
+## Reuse check
+
+The comparison pass also checks whether the change uses the repository's existing helpers and patterns, and proposes what it finds with `R-*` IDs. The check lives there because Codex's native review takes no custom instructions when a scope is selected, and asking only Claude's reviewer to look would skew the effectiveness comparison.
+
+`R-*` proposals are not independent findings, because the comparison process raises them after reading both reviews. Keep them out of `findings`, `groups`, and effectiveness metrics. A duplication finding raised by an independent reviewer stays a normal `C-*` or `X-*` finding in its group, and is not repeated here.
+
+In the report, list each verified issue under `Reuse of existing code` with its severity, `Location:` line (the new code first, then the existing helper or pattern), the existing code to use, evidence, and the suggested change. Confirmed issues must explain how replacement preserves inputs, outputs, edge cases, errors, and side effects, without changes to the helper's contract or visibility or a dependency/layering violation. Label plausible candidates with unproven equivalence or safe accessibility as uncertain, stating the missing evidence and any prerequisite contract or visibility refactor and verification. Omit rejected proposals, including known behavioral incompatibilities and layering violations. Medium severity requires evidence of a meaningful divergence needing correction or a concrete maintenance burden, rather than duplication alone.
+
+Carry the comparison's brief `Coverage:` line into both `final.md` and chat: complete or incomplete, files checked, areas skipped with reasons, and unfinished searches. Routine exclusions and candidates already covered by model groups do not make coverage incomplete; unread relevant code or unfinished required searches do. If no proposals survive a completed check, say so in one line; when there is no new logic, explain that searches were unnecessary. Reserve `Reuse check: none found` for a completed check with no surviving proposals. If coverage is incomplete, say `Reuse check: incomplete`, retain supported issues, and describe the limits even when no proposals survive. Host adjudication must preserve these limits unless it completes the missing checks.
 
 ## adjudication.json
 
@@ -201,16 +214,64 @@ Add one override entry whenever your final disposition differs from Codex's prop
 
 ## Final report presentation
 
-In both `<run_directory>/final.md` and the final chat output, use this opening section order: `Cross-review effectiveness`, `Summary`, then `Confirmed Findings`. Keep these three sections consecutive, placing uncertain findings, existing PR discussion, and other supporting details afterward. Include a `Provenance` section in the saved report after the findings and supporting sections, before `Run issues` when present. Lead with bold Repo, Branch, and Review Scope fields in that order. For PR mode, render Review Scope as `Pull request #<id>` in both preflight and saved provenance, including without `--debug`. For branch mode, render Review Scope as `Compare <source-branch> vs <target-branch>` in both places even without `--debug`, using the actual frozen source and target branch names (strip only a leading `refs/heads/` for display). Append ` + uncommitted local changes` when applicable. Always record PR ID when applicable, run/repository identifiers, provider/host, source/target refs and commits, model/effort settings for all stages and their resolution sources, review size, and estimates. Keep all this information in structured run artifacts as well. In preflight, always show Repo, Branch, and Review Scope in that order and with greater emphasis than model/effort settings. Show other scope/revision details (PR, provider/host, source/target refs and commits, metadata access, and workspace) only with `--debug`; always include them in the saved report. Render model/effort settings in the same regular size and weight as other supporting text, with smaller, muted, unbolded source/target details. Number confirmed findings sequentially. Put each finding's `Location:` line (see Finding locations) directly under its title, and put the suggested fix beneath the issue description rather than in a separate column. Rejected and uncertain entries also lead with their location. Omit `Provenance` from chat output, including when `--debug` is set, to keep the focus on findings. A compact run-folder link may go at the end. The `Summary` gives a high-level account of the reviewed changes. Aim for one or two paragraphs and never exceed four. Summarize the reviewed diff rather than the review process: explain the main behavior and affected areas, leading with critical or breaking changes and any compatibility, migration, configuration, data, API, deployment, or rollout implications. If no breaking change is evident, say so briefly rather than inventing one. Base the summary on the frozen diff and inspected source; PR title and description are context, not proof. For branch and uncommitted modes, summarize the selected change scope the same way.
+In both `<run_directory>/final.md` and the final chat output, use this opening section order: `Cross-review effectiveness`, `Summary`, then `Confirmed Findings`. Keep these three sections consecutive, placing reuse of existing code, uncertain findings, existing PR discussion, and other supporting details afterward. Include a `Provenance` section in the saved report after the findings and supporting sections, before `Run issues` when present. Lead with bold Repo, Branch, and Review Scope fields in that order. For PR mode, render Review Scope as `Pull request #<id>` in both preflight and saved provenance, including without `--debug`. For branch mode, render Review Scope as `Compare <source-branch> vs <target-branch>` in both places even without `--debug`, using the actual frozen source and target branch names (strip only a leading `refs/heads/` for display). Append ` + uncommitted local changes` when applicable. Always record PR ID when applicable, run/repository identifiers, provider/host, source/target refs and commits, model/effort settings for all stages and their resolution sources, review size, and estimates. Keep all this information in structured run artifacts as well. In preflight, always show Repo, Branch, and Review Scope in that order and with greater emphasis than model/effort settings. Show other scope/revision details (PR, provider/host, source/target refs and commits, metadata access, and workspace) only with `--debug`; always include them in the saved report. Render model/effort settings in the same regular size and weight as other supporting text, with smaller, muted, unbolded source/target details. Number confirmed findings sequentially. Put each finding's `Location:` line (see Finding locations) directly under its title, and put the suggested fix beneath the issue description rather than in a separate column. Rejected and uncertain entries also lead with their location. Omit `Provenance` from chat output, including when `--debug` is set, to keep the focus on findings. A compact run-folder link may go at the end. The `Summary` gives a high-level account of the reviewed changes. Aim for one or two paragraphs and never exceed four. Summarize the reviewed diff rather than the review process: explain the main behavior and affected areas, leading with critical or breaking changes and any compatibility, migration, configuration, data, API, deployment, or rollout implications. If no breaking change is evident, say so briefly rather than inventing one. Base the summary on the frozen diff and inspected source; PR title and description are context, not proof. For branch and uncommitted modes, summarize the selected change scope the same way.
+
+## Stage timing
+
+Both hosts record timing from observed clocks, not model estimates. Save `timing-input.json` (host-captured intervals) and script-generated `timing.json` alongside the other artifacts. These are additive artifacts for schemas 3 and 4; existing histories and effectiveness metrics are unchanged. Never hand-write `timing.json`.
+
+Capture UTC Unix milliseconds at the following boundaries as work happens, retaining them even while tools run in the background:
+
+- `preparation`: approval (`started_at_unix_ms`) through immediately before launching the first independent reviewer.
+- `claude_review` and `codex_review`: each invocation's own start and finish, excluding result normalization and time spent waiting after it has finished. In the Codex-led workflow, read each supervisor `<invocation-path>.timing.json` sidecar. In the Claude-led workflow, bracket the native Claude skill with host clock calls, and use `Invoke-ReviewWithTiming.ps1` for the background Codex command. Capture the Claude end before waiting for Codex. A host-bracketed native skill includes the clock-tool boundary overhead.
+- `pr_discussion`: immediately before snapshot retrieval through completion of normalization or the unavailable snapshot, including fallbacks. For non-PR mode record `status: skipped` with reason `Not a PR review`.
+- `comparison`: the comparison invocation's own start and finish, including startup, grouping, source verification, PR discussion assessment, reuse work, and final response generation. Use the supervisor sidecar or the timed invocation wrapper. Exclude host result extraction.
+- `reuse_check`: the comparison child reads the clock immediately before listing changed files and after completing reuse searches, reads, and candidate decisions. It returns exactly one standalone `Reuse timing: {"started_at_unix_ms":<integer>,"completed_at_unix_ms":<integer>}` line in its final response as the shared prompt requires. Do not interleave other comparison work during this interval. No-new-logic checks still measure classification time. The host's later verification of reuse proposals belongs to adjudication, not this interval.
+- `adjudication_reporting`: before host source verification through the report cutoff captured immediately before rendering the final report, including metrics and report preparation. That cutoff is also the total-run endpoint. Report rendering, history append, and cleanup afterward are outside this snapshot.
+
+Write the input with the authoritative run start, report cutoff, and the six host-captured stages (reuse is read from the comparison report by the calculator). For example:
+
+```json
+{
+  "schema_version": 1,
+  "started_at_unix_ms": 1788984000000,
+  "report_at_unix_ms": 1788984280000,
+  "stages": {
+    "preparation": {"started_at_unix_ms": 1788984000000, "completed_at_unix_ms": 1788984020000},
+    "claude_review": {"started_at_unix_ms": 1788984020000, "completed_at_unix_ms": 1788984120000},
+    "codex_review": {"started_at_unix_ms": 1788984021000, "completed_at_unix_ms": 1788984141000},
+    "pr_discussion": {"started_at_unix_ms": 1788984150000, "completed_at_unix_ms": 1788984160000},
+    "comparison": {"started_at_unix_ms": 1788984170000, "completed_at_unix_ms": 1788984230000},
+    "adjudication_reporting": {"started_at_unix_ms": 1788984240000, "completed_at_unix_ms": 1788984280000}
+  }
+}
+```
+
+Measured stages may include `status: measured`; otherwise it is inferred. If an interval was not captured, including a missing `.timing.json` sidecar (saving one never fails a finished review), use `status: unavailable` and a specific `reason`, with no invented timestamps or zero duration. Missing stages likewise render unavailable. Do not restart an expensive review just to recover timing. Retain timing limitations in normal output even without `--debug`.
+
+Before rendering, run `scripts/Measure-ReviewTiming.ps1 -InputPath <run_directory>/timing-input.json -ComparisonReportPath <comparison-report.md> -OutputPath <run_directory>/timing.json`. It validates positive, ordered timestamps inside the run, rejects overlapping serial phases, and treats missing, duplicate, malformed, or out-of-parent reuse timing as unavailable without suppressing review findings. If a host-captured interval fails validation, correct it only from retained clock evidence; otherwise mark it unavailable and rerun.
+
+Use its `report_text` verbatim beneath `Cross-review effectiveness` in both `final.md` and chat, including every stage, skip/unavailable reason, and concurrency note. All values are elapsed wall time rounded to the nearest second for display; the artifact retains millisecond precision. The independent-reviews wall window runs from the earlier start to the later finish; overlap is the intersection of the two intervals, not an assumption that both started together. Never sum the individual review durations into the run total. Comparison includes reuse; its excluding-reuse value is the parent's duration minus that child interval. Never add reuse again to total time. `Other orchestration` is the remaining elapsed time after preparation, the independent-reviews wall window, PR capture, comparison, and adjudication/report preparation; it includes normalization, extraction, artifact persistence, and gaps between stages. It is unavailable if any required top-level interval is unavailable. Do not alter estimator/history duration semantics: history continues measuring through append, later than this report cutoff.
 
 ## Effectiveness summary
 
-`<run_directory>/final.md` and the final chat output must both contain this block. Take the effectiveness values from `metrics.json`. Compute total run time from the authoritative `started_at_unix_ms` through final-report generation, round to the nearest second, and render it as a compact duration such as `8m 14s` or `1h 03m 09s`:
+`<run_directory>/final.md` and the final chat output must both contain this block. Take the effectiveness values from `metrics.json` and all timing lines from `timing.json.report_text` as Stage timing defines. Render compact durations such as `8m 14s` or `1h 03m 09s`:
 
 ```text
 Cross-review effectiveness
 
 Total run time: <duration>
+Preparation: <duration or unavailable>
+Independent reviews (wall time): <duration or unavailable>
+  Claude review: <duration or unavailable>
+  Codex review: <duration or unavailable>
+  Overlap: <duration or unavailable> (individual review times are not additive)
+PR discussion capture: <duration, skipped, or unavailable>
+Comparison (includes reuse check): <duration or unavailable>
+  Reuse check: <duration or unavailable>
+  Comparison excluding reuse check: <duration or unavailable>
+Adjudication and report preparation: <duration or unavailable>
+Other orchestration: <duration or unavailable>
 
 Initial:
   Claude: <high> high, <medium> medium, <low> low (<total>)

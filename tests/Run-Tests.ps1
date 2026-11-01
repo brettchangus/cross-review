@@ -1,3 +1,4 @@
+#requires -Version 7.4
 [CmdletBinding()]
 param()
 
@@ -1650,6 +1651,115 @@ try {
         $script:failed++
         Write-Output "FAIL estimate-oversized-untracked-file - $($_.Exception.Message)"
     }
+
+    $timedWrapperScript = Join-Path $skillDirectory 'scripts/Invoke-ReviewWithTiming.ps1'
+    $timingScript = Join-Path $skillDirectory 'scripts/Measure-ReviewTiming.ps1'
+    $comparisonBuilderScript = Join-Path $skillDirectory 'scripts/New-CodexComparisonInvocation.ps1'
+    $timingRoot = Join-Path $testRoot ('timing ' + [char]0x4E16)
+    New-Item -ItemType Directory -Path $timingRoot | Out-Null
+    $stdinProbePath = Join-Path $timingRoot 'stdin-probe.ps1'
+    [System.IO.File]::WriteAllText($stdinProbePath, @'
+param([string]$CapturePath, [int]$Code)
+$stream = [IO.File]::Create($CapturePath)
+[Console]::OpenStandardInput().CopyTo($stream)
+$stream.Dispose()
+[Console]::Error.WriteLine('reviewer progress')
+exit $Code
+'@, [System.Text.UTF8Encoding]::new($false))
+    $shellPath = (Get-Process -Id $PID).Path
+    $stdinEvidence = 'stdin ' + [char]0x00E9 + ' ' + [char]0x4E16
+    function New-TimedManifest {
+        param([string]$Name, [int]$Code = 0)
+        $manifestPath = Join-Path $timingRoot "$Name.json"
+        Write-JsonFile $manifestPath ([ordered]@{
+            executable = $shellPath
+            working_directory = $timingRoot
+            arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $stdinProbePath, '-CapturePath', "$manifestPath.stdin", '-Code', [string]$Code)
+            standard_input = $stdinEvidence
+        })
+        return $manifestPath
+    }
+
+    try {
+        $manifestPath = New-TimedManifest 'timed-success'
+        & $timedWrapperScript -InvocationPath $manifestPath 2>&1 | Out-Null
+        $interval = Get-Content -LiteralPath "$manifestPath.timing.json" -Raw | ConvertFrom-Json
+        if ($interval.exit_code -ne 0 -or $interval.completed_at_unix_ms -lt $interval.started_at_unix_ms) { throw 'timing interval is incorrect' }
+        $captured = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes("$manifestPath.stdin"))
+        if (-not $captured.Contains($stdinEvidence)) { throw 'non-ASCII standard input was altered' }
+
+        $failingPath = New-TimedManifest 'timed-failure' 9
+        $failedMessage = $null
+        try { & $timedWrapperScript -InvocationPath $failingPath 2>&1 | Out-Null } catch { $failedMessage = $_.Exception.Message }
+        if ($failedMessage -notmatch 'exited 9') { throw 'non-zero exit was not reported' }
+        if ((Get-Content -LiteralPath "$failingPath.timing.json" -Raw | ConvertFrom-Json).exit_code -ne 9) { throw 'failed invocation timing was lost' }
+
+        $unwritablePath = New-TimedManifest 'timed-unwritable'
+        New-Item -ItemType Directory -Path "$unwritablePath.timing.json" | Out-Null
+        & $timedWrapperScript -InvocationPath $unwritablePath 2>&1 3>$null | Out-Null
+        if (-not (Test-Path -LiteralPath "$unwritablePath.stdin" -PathType Leaf)) { throw 'unwritable timing failed the finished command' }
+        $script:passed++
+        Write-Output 'PASS timed-wrapper-encoding-stderr-and-timing-failure'
+    } catch {
+        $script:failed++
+        Write-Output "FAIL timed-wrapper-encoding-stderr-and-timing-failure - $($_.Exception.Message)"
+    }
+
+    try {
+        $timingInputPath = Join-Path $timingRoot 'timing-input.json'
+        $timingOutputPath = Join-Path $timingRoot 'timing.json'
+        $timingReportPath = Join-Path $timingRoot 'comparison.md'
+        Write-JsonFile $timingInputPath ([ordered]@{
+            schema_version = 1; started_at_unix_ms = 1000000; report_at_unix_ms = 1300000
+            stages = [ordered]@{
+                preparation = [ordered]@{ started_at_unix_ms = 1000000; completed_at_unix_ms = 1020000 }
+                claude_review = [ordered]@{ started_at_unix_ms = 1020000; completed_at_unix_ms = 1120000 }
+                codex_review = [ordered]@{ started_at_unix_ms = 1040000; completed_at_unix_ms = 1140000 }
+                pr_discussion = [ordered]@{ status = 'skipped'; reason = 'Not a PR review' }
+                comparison = [ordered]@{ started_at_unix_ms = 1150000; completed_at_unix_ms = 1240000 }
+                adjudication_reporting = [ordered]@{ started_at_unix_ms = 1250000; completed_at_unix_ms = 1300000 }
+            }
+        })
+        $record = '{"started_at_unix_ms":1180000,"completed_at_unix_ms":1210000}'
+        foreach ($line in @("Reuse timing: $record", "- Reuse timing: $record", "**Reuse timing:** $record", "``Reuse timing: $record``")) {
+            [System.IO.File]::WriteAllText($timingReportPath, "Report`r`n$line`r`n")
+            $timing = & $timingScript -InputPath $timingInputPath -ComparisonReportPath $timingReportPath -OutputPath $timingOutputPath | ConvertFrom-Json
+            if ($timing.stages.reuse_check.duration_seconds -ne 30 -or $timing.total_seconds -ne 300 -or
+                $timing.independent_reviews_overlap_seconds -ne 80 -or $timing.other_seconds -ne 20) { throw "timing is incorrect for: $line" }
+        }
+        [System.IO.File]::WriteAllText($timingReportPath, "Reuse timing: $record`nReuse timing: $record")
+        $timing = & $timingScript -InputPath $timingInputPath -ComparisonReportPath $timingReportPath -OutputPath $timingOutputPath | ConvertFrom-Json
+        if ($timing.stages.reuse_check.status -ne 'unavailable') { throw 'duplicate reuse records became a measurement' }
+        $script:passed++
+        Write-Output 'PASS stage-timing-on-current-shell'
+    } catch {
+        $script:failed++
+        Write-Output "FAIL stage-timing-on-current-shell - $($_.Exception.Message)"
+    }
+
+    try {
+        $comparisonInputs = @('claude.md', 'codex.md', 'context.json') | ForEach-Object { Join-Path $timingRoot $_ }
+        foreach ($inputPath in $comparisonInputs) { [System.IO.File]::WriteAllText($inputPath, 'fixture') }
+        $outputReportPath = Join-Path $timingRoot 'codex-evaluation.md'
+        $comparison = & $comparisonBuilderScript -WorkingDirectory $timingRoot -ClaudeReviewPath $comparisonInputs[0] -CodexReviewPath $comparisonInputs[1] -RunContextPath $comparisonInputs[2] -OutputPath $outputReportPath -Model 'fixture-model' -ReasoningEffort high | ConvertFrom-Json
+        $comparisonArguments = @($comparison.arguments | ForEach-Object { [string]$_ })
+        if ($comparisonArguments -contains 'review' -or $comparisonArguments[0] -ne 'exec' -or $comparisonArguments[-1] -ne '-' -or
+            $comparisonArguments -notcontains 'read-only' -or $comparisonArguments -notcontains '--ephemeral' -or
+            $comparisonArguments -notcontains $outputReportPath -or $comparisonArguments -notcontains 'model_reasoning_effort="high"' -or
+            $comparisonArguments -notcontains 'fixture-model') { throw 'comparison arguments are incorrect' }
+        foreach ($expected in @('Cross-review comparison pass', 'run the reuse check', 'Reuse timing:', 'Input paths (data):')) {
+            if (-not ([string]$comparison.standard_input).Contains($expected)) { throw "comparison prompt is missing: $expected" }
+        }
+        $missingMessage = $null
+        try { & $comparisonBuilderScript -WorkingDirectory $timingRoot -ClaudeReviewPath 'relative.md' -CodexReviewPath $comparisonInputs[1] -RunContextPath $comparisonInputs[2] -OutputPath $outputReportPath | Out-Null }
+        catch { $missingMessage = $_.Exception.Message }
+        if ($missingMessage -notmatch 'existing absolute') { throw 'relative input path was accepted' }
+        $script:passed++
+        Write-Output 'PASS codex-comparison-invocation'
+    } catch {
+        $script:failed++
+        Write-Output "FAIL codex-comparison-invocation - $($_.Exception.Message)"
+    }
 } finally {
     # Remove-ReviewWorkspace.ps1 moves the caller into the repository it cleaned, which can leave
     # this session inside $testRoot and make the directory removal below fail as "in use".
@@ -1670,8 +1780,4 @@ Write-Output "$passed passed, $failed failed"
 if ($failed -gt 0) { exit 1 }
 & (Join-Path $PSScriptRoot 'Run-ProviderTests.ps1')
 if ($LASTEXITCODE -ne 0) { exit 1 }
-if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
-    & (Join-Path $PSScriptRoot 'Run-CodexTests.ps1') | Out-Null
-} else {
-    Write-Output 'Codex tests require PowerShell 7.4 or later.'
-}
+& (Join-Path $PSScriptRoot 'Run-CodexTests.ps1') | Out-Null

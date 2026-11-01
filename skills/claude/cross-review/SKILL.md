@@ -6,7 +6,7 @@ argument-hint: "[--debug] [--effort low|medium|high|xhigh] [pr <number-or-GitHub
 
 # Cross-review
 
-Run a read-only, two-model review of the highest-precedence eligible change scope. Do not modify source code, PR state, or PR comments.
+Run a read-only, two-model review of the highest-precedence eligible change scope. Do not modify source code, PR state, or PR comments. Run scripts with PowerShell 7.4 or later (`pwsh`).
 
 Accept either:
 
@@ -17,7 +17,7 @@ Accept either:
 
 The optional `--debug` flag can appear anywhere alongside the other options.
 
-Use [prompts/codex-evaluate.md](prompts/codex-evaluate.md) for the Codex comparison pass.
+Use [prompts/codex-evaluate.md](prompts/codex-evaluate.md) followed by [prompts/reuse-check.md](prompts/reuse-check.md) for the Codex comparison pass.
 
 ## Invariants
 
@@ -204,7 +204,7 @@ A selected or typed `y`/`yes`, ignoring case and surrounding whitespace, is the 
 
 On any non-approval, report `Cross-review cancelled: no review was run and no history entry was written.` Delete only the exact temporary metadata files created during preflight, then stop. Do not create a worktree, artifacts, or Git exclusions.
 
-Immediately after approval, record the current UTC timestamp as `started_at` and Unix epoch milliseconds as `started_at_unix_ms`. This is the active review start used for history, so time spent considering the confirmation does not train future estimates.
+Immediately after approval, record the current UTC timestamp as `started_at` and Unix epoch milliseconds as `started_at_unix_ms`. This is the active review start used for history, so time spent considering the confirmation does not train future estimates. Follow Stage timing in [references/artifact-contract.md](references/artifact-contract.md): retain observed boundaries from here onward for preparation, each review, PR-discussion capture, comparison, and adjudication/report preparation. End preparation before starting Codex. Bracket the native `/code-review` call with host clock reads (after entering the worktree), ending its interval as soon as it returns, before normalization or waiting for Codex.
 
 For an actual run only, keep bookkeeping out of future status and review scopes by adding the repository-local exclusions idempotently:
 
@@ -244,19 +244,19 @@ Start Codex's independent review first and leave it running while Claude reviews
 Build the scoped native invocation with the bundled helper:
 
 ```powershell
-$invocation = & "${CLAUDE_SKILL_DIR}/scripts/New-CodexReviewInvocation.ps1" `
+$invocation = (& "${CLAUDE_SKILL_DIR}/scripts/New-CodexReviewInvocation.ps1" `
   -ReviewMode <pull_request|uncommitted|branch> `
   -WorkingDirectory <review-workspace> `
   [-BaseCommit <target-commit>] `
   -OutputPath <temporary-run-directory>/codex-independent.md `
   [-Model <resolved-model>] `
-  -ReasoningEffort <selected-effort> | ConvertFrom-Json
+  -ReasoningEffort <selected-effort>) -join "`n"
 
-$codexArguments = @($invocation.arguments | ForEach-Object { [string]$_ })
-& ([string]$invocation.executable) @codexArguments
+[IO.File]::WriteAllText('<temporary-run-directory>/codex-invocation.json', $invocation, [Text.UTF8Encoding]::new($false))
+& "${CLAUDE_SKILL_DIR}/scripts/Invoke-ReviewWithTiming.ps1" -InvocationPath '<temporary-run-directory>/codex-invocation.json'
 ```
 
-Run it with the shell tool's background option so the session continues immediately, and retain the returned background task ID as `codex_review_task_id`. Then invoke the installed native `/code-review` with the selected scope:
+The wrapper writes `<invocation-path>.timing.json` when the command finishes; retain that interval in `timing-input.json` before deleting the temporary directory. This avoids counting host polling delay as Codex review time. Run it with the shell tool's background option so the session continues immediately, and retain the returned background task ID as `codex_review_task_id`. Then invoke the installed native `/code-review` with the selected scope:
 
 - Combined PR/branch: the merge base of `<target-commit>` and workspace `HEAD` against the full workspace, including its staged local overlay.
 - Clean PR: the workspace's `HEAD` against the recorded `<target-commit>`. This is the same `target...source` scope Codex receives through `--base <target-commit>`. Do not pass `pr <id>`: `/code-review` resolves PR numbers through its own provider integration rather than the validated frozen scope, so it could fail or review a different change.
@@ -296,7 +296,7 @@ After Codex succeeds, create this run's folder. The script validates that review
   -StartedAt <started_at>
 ```
 
-Stop if it fails: `.reviews` or `.reviews/runs` must be regular directories, and the history file must not be a directory, symbolic link, junction, or reparse point. Retain the returned `run_directory` (absolute) for every later artifact path. Add its `run_directory_relative` value to `run-context.json` as `run_directory`, then move the three initial artifacts into the run folder. Add run metadata to the Codex artifact and assign findings in original order as `X-001`, `X-002`, and so on, each with a repository-relative `Location:` line. Convert Codex's absolute worktree paths to repository-relative paths. Remove the temporary run directory after its contents are moved.
+Stop if it fails: `.reviews` or `.reviews/runs` must be regular directories, and the history file must not be a directory, symbolic link, junction, or reparse point. Retain the returned `run_directory` (absolute) for every later artifact path. Add its `run_directory_relative` value to `run-context.json` as `run_directory`, then move the three initial artifacts and the retained `timing-input.json` into the run folder. Add run metadata to the Codex artifact and assign findings in original order as `X-001`, `X-002`, and so on, each with a repository-relative `Location:` line. Convert Codex's absolute worktree paths to repository-relative paths. Keep the temporary run directory for the comparison manifest in step 6.
 
 The run folder is permanent from this point. If a later step fails, leave it in place: it records what the run produced.
 
@@ -306,15 +306,34 @@ For PR mode only, now snapshot its discussion into `<run_directory>/pr-comments.
 
 ## 6. Codex comparison
 
-Invoke Codex again with the contents of [prompts/codex-evaluate.md](prompts/codex-evaluate.md), passing `--cd <review-workspace> --sandbox read-only --ephemeral`, the same resolved model when known, and `-c 'model_reasoning_effort="<selected-effort>"'`. Always pass `--output-last-message <run_directory>/codex-evaluation.md` so the CLI saves the final response without a model-generated file write. With the prompt, supply the absolute paths of `<run_directory>/claude-review.md`, `codex-independent.md`, `run-context.json`, and `pr-comments.json` in PR mode; these may live outside the review workspace. Codex validates model findings with targeted source checks, proposes duplicate groups, classifies each issue as `confirmed`, `rejected`, or `uncertain`, and assesses the PR discussion separately.
+Build the comparison invocation with the bundled helper and run it through the timing wrapper:
 
-Wait for successful comparison completion and read the final report before starting adjudication. If comparison fails or is unusable, stop without adjudication or history and clean up as the invariants require.
+```powershell
+$comparison = (& "${CLAUDE_SKILL_DIR}/scripts/New-CodexComparisonInvocation.ps1" `
+  -WorkingDirectory <review-workspace> `
+  -ClaudeReviewPath <run_directory>/claude-review.md `
+  -CodexReviewPath <run_directory>/codex-independent.md `
+  -RunContextPath <run_directory>/run-context.json `
+  [-PrCommentsPath <run_directory>/pr-comments.json] `
+  -OutputPath <run_directory>/codex-evaluation.md `
+  [-Model <resolved-model>] `
+  -ReasoningEffort <selected-effort>) -join "`n"
+
+[IO.File]::WriteAllText('<temporary-run-directory>/comparison-invocation.json', $comparison, [Text.UTF8Encoding]::new($false))
+& "${CLAUDE_SKILL_DIR}/scripts/Invoke-ReviewWithTiming.ps1" -InvocationPath '<temporary-run-directory>/comparison-invocation.json'
+```
+
+All paths are absolute; the input files may live outside the review workspace. The helper supplies [prompts/codex-evaluate.md](prompts/codex-evaluate.md) and [prompts/reuse-check.md](prompts/reuse-check.md) on standard input, pins `--cd <review-workspace> --sandbox read-only --ephemeral` and the selected reasoning effort, and passes `--output-last-message` so the CLI saves the final response without a model-generated file write. Codex validates model findings with targeted source checks, proposes duplicate groups, classifies each issue as `confirmed`, `rejected`, or `uncertain`, runs the reuse check, and assesses the PR discussion separately.
+
+Copy the interval from `comparison-invocation.json.timing.json` into `timing-input.json`, then remove the temporary run directory. Do not use the time a background wait returns as the finish. The comparison response includes a separate observed `Reuse timing:` record. Wait for successful comparison completion and read the final report before starting adjudication. If comparison fails or is unusable, stop without adjudication or history and clean up as the invariants require.
 
 ## 7. Claude adjudication and metrics
 
-Validate every proposed group against source, consulting repository guidance, tests, and history when useful. Read source and diffs from the review workspace selected in step 3, never from a checkout that does not hold the reviewed commit. Pay attention to Claude findings Codex rejected, Codex-only findings, severity disagreements, and duplicates.
+Record the adjudication/report-preparation start now, after reading the comparison and before source verification. Validate every proposed group against source, consulting repository guidance, tests, and history when useful. Read source and diffs from the review workspace selected in step 3, never from a checkout that does not hold the reviewed commit. Pay attention to Claude findings Codex rejected, Codex-only findings, severity disagreements, and duplicates.
 
 For PR mode, inspect `pr-comments.json` and the comparison's thread matches. Check comment-only concerns against the frozen source. In the final report, identify model findings already raised in a thread and include a separate `Existing PR discussion` section for verified comment-only issues, with thread ID, status, and source evidence. Mention obsolete, fixed, or unresolved claims only as useful context. Do not put comment-only issues in the adjudication ledger or model effectiveness metrics, and never treat a comment or resolved status as proof. If the snapshot's `capabilities.complete` is false, replace that section with a note that PR discussion was not captured, giving its `unavailable_reason`; never say the PR has no comments.
+
+Verify each `R-*` proposal from the comparison's reuse check by reading both the new code and the existing helper or pattern, and drop any that does not hold. Report the survivors under `Reuse of existing code` as Reuse check in the artifact contract defines. Do not put them in the adjudication ledger or model effectiveness metrics.
 
 Write `<run_directory>/adjudication.json` under schema version 3 in [references/artifact-contract.md](references/artifact-contract.md). Every `C-*` and `X-*` ID appears in exactly one group. `pull_request.id` is positive only for PR mode and `null` otherwise. Record disposition changes in `adjudication.codex_disposition_overrides`, using `[]` when empty.
 
@@ -328,9 +347,9 @@ If validation fails, fix the ledger and rerun once. After two failed attempts to
 
 ## 8. Final report
 
-Write `<run_directory>/final.md` with complete effectiveness metrics, elapsed time, disposition-override count, and each confirmed finding with its finding IDs. Place uncertain groups, useful disagreements, and other supporting sections after confirmed findings. Include a `Provenance` section in the saved report after the findings and supporting sections, before `Run issues` when present. Lead with bold Repo, Branch, and Review Scope fields in that order. For PR mode, include the PR number in Review Scope (`Pull request #<id>`) in preflight and saved provenance even without `--debug`. For branch mode, use `Compare <source-branch> vs <target-branch>` in Review Scope even without `--debug`, naming the actual resolved comparison target; append ` + uncommitted local changes` when applicable. Always include PR ID when applicable, run/repository identifiers, provider/host, source/target refs and commits, model/effort information for all stages and resolution sources, review size, and estimate. Keep all this information in structured run artifacts as well; apply the debug-only scope/revision rules when rendering preflight. Omit `Provenance` from chat output even with `--debug`. Use regular supporting text for model/effort settings and smaller, muted, unbolded text for source/target details. Number confirmed findings sequentially. Give every finding (confirmed, uncertain, and rejected, in both `final.md` and chat) a `Location:` line of repository-relative `file:line` entries verified against the review workspace, following Finding locations in the artifact contract. Show each suggested fix beneath its issue description, never in a separate column. A compact run-folder link may go at the end.
+Write `<run_directory>/final.md` with complete effectiveness metrics, elapsed time, disposition-override count, and each confirmed finding with its finding IDs. Place `Reuse of existing code`, uncertain groups, useful disagreements, and other supporting sections after confirmed findings. Include a `Provenance` section in the saved report after the findings and supporting sections, before `Run issues` when present. Lead with bold Repo, Branch, and Review Scope fields in that order. For PR mode, include the PR number in Review Scope (`Pull request #<id>`) in preflight and saved provenance even without `--debug`. For branch mode, use `Compare <source-branch> vs <target-branch>` in Review Scope even without `--debug`, naming the actual resolved comparison target; append ` + uncommitted local changes` when applicable. Always include PR ID when applicable, run/repository identifiers, provider/host, source/target refs and commits, model/effort information for all stages and resolution sources, review size, and estimate. Keep all this information in structured run artifacts as well; apply the debug-only scope/revision rules when rendering preflight. Omit `Provenance` from chat output even with `--debug`. Use regular supporting text for model/effort settings and smaller, muted, unbolded text for source/target details. Number confirmed findings sequentially. Give every finding (confirmed, uncertain, and rejected, in both `final.md` and chat) a `Location:` line of repository-relative `file:line` entries verified against the review workspace, following Finding locations in the artifact contract. Show each suggested fix beneath its issue description, never in a separate column. A compact run-folder link may go at the end.
 
-Start with `Cross-review effectiveness`, followed immediately by `Summary` and `Confirmed Findings`, as required by the artifact contract. The summary is normally one or two paragraphs and never more than four, with critical or breaking behavior and compatibility, migration, configuration, data, API, deployment, or rollout implications first. Derive it from the frozen diff and inspected source rather than trusting PR prose. Capture the current UTC time immediately before rendering the report, compute total run time from `started_at_unix_ms`, round to the nearest second, and put the compact duration in the `Cross-review effectiveness` block as specified by the contract.
+Start with `Cross-review effectiveness`, followed immediately by `Summary` and `Confirmed Findings`, as required by the artifact contract. The summary is normally one or two paragraphs and never more than four, with critical or breaking behavior and compatibility, migration, configuration, data, API, deployment, or rollout implications first. Derive it from the frozen diff and inspected source rather than trusting PR prose. Immediately before rendering the report, capture the report cutoff, end adjudication/report preparation, and run `scripts/Measure-ReviewTiming.ps1 -InputPath <run_directory>/timing-input.json -ComparisonReportPath <run_directory>/codex-evaluation.md -OutputPath <run_directory>/timing.json` as Stage timing in the artifact contract defines. Use its `report_text` verbatim in the `Cross-review effectiveness` block in both saved report and chat, including unavailable timing reasons. Independent review durations overlap; reuse time is included in comparison, not an additional stage to sum.
 
 Do not put rejected findings in the main findings list. Present the same final findings and effectiveness summary in chat. Only when parsed `debug` is true and anything unexpected happened, end both with the `Run issues` section from the artifact contract: every unexpected failure and workaround from this run, including hand-corrected data and likely skill bugs. Without `--debug`, or with no issues, omit the section entirely. With `--debug`, add any history-append or cleanup problems to the chat version. Blocking errors and material review limitations still belong in the normal report or stop message.
 

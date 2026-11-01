@@ -1,8 +1,8 @@
 # Cross-review comparison pass
 
-This is the comparison pass, not the independent Codex review. The independent review is already complete.
+This is the comparison pass, not the independent Codex review. The independent review is already complete. Read-only clock commands for the reuse timing record are in scope.
 
-Read the Claude review, Codex independent review, run context, and PR comment snapshot when provided at the absolute paths supplied with this prompt first. Group findings that appear to describe the same root cause and impact, then validate each proposed group with targeted reads of the relevant diff hunks, source, and callers. Expand those reads only when needed to resolve a claim. Do not scan the entire diff again for new model findings. If both reviews contain no findings, report that there are no model groups, then still assess any PR comments.
+Read the Claude review, Codex independent review, run context, and PR comment snapshot when provided at the absolute paths supplied with this prompt first. Group findings that appear to describe the same root cause and impact, then validate each proposed group with targeted reads of the relevant diff hunks, source, and callers. Expand those reads only when needed to resolve a claim. Do not scan the entire diff again for new model findings; only the reuse check below looks for new issues, and it reports separately. If both reviews contain no findings, report that there are no model groups, then still run the reuse check and assess any PR comments.
 
 The current working directory is the exact reviewed workspace, holding the source commit recorded during preflight. It is either the reviewed repository itself or a detached worktree at that commit, and the review files may live outside it. Check claims only against this workspace.
 

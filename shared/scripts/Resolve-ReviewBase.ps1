@@ -1,3 +1,4 @@
+#requires -Version 7.4
 [CmdletBinding()]
 param([string]$RemoteName, [string[]]$GitHubHost = @())
 $ErrorActionPreference = 'Stop'

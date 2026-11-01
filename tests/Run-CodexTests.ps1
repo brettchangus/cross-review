@@ -100,6 +100,8 @@ try {
     $stopper = Join-Path $package 'scripts/Stop-ReviewProcesses.ps1'
     $measureScript = Join-Path $package 'scripts/Measure-ReviewEffectiveness.ps1'
     $appendScript = Join-Path $package 'scripts/Append-ReviewHistory.ps1'
+    $timingScript = Join-Path $package 'scripts/Measure-ReviewTiming.ps1'
+    $timedWrapper = Join-Path $package 'scripts/Invoke-ReviewWithTiming.ps1'
     $storageScript = Join-Path $package 'scripts/Assert-ReviewStorageSafe.ps1'
     $runDirectoryScript = Join-Path $package 'scripts/New-ReviewRunDirectory.ps1'
     $ledgerPath = Join-Path $testRoot 'ledger.json'
@@ -283,7 +285,10 @@ try {
         if ($invocation.effort -ne 'medium' -or $invocation.arguments -contains '--resume') { throw 'Comparison effort or freshness incorrect' }
         foreach ($path in $inputPaths) { if (-not $invocation.standard_input.Contains(($path | ConvertTo-Json -Compress))) { throw 'Missing escaped input path' } }
         if (-not $invocation.standard_input.Contains('Run one command per call')) { throw 'Single-command guidance missing' }
+        $comparisonAllowed = [string]$invocation.arguments[[Array]::IndexOf([object[]]$invocation.arguments, '--allowedTools') + 1]
+        if (-not $comparisonAllowed.Contains('Bash(date +%s%3N)')) { throw 'Comparison cannot read the reuse timing clock' }
         if (-not $invocation.standard_input.Contains("git diff '@{upstream}...HEAD'")) { throw 'Comparison revision quoting guidance missing' }
+        if (-not $invocation.standard_input.Contains('run the reuse check') -or -not $invocation.standard_input.Contains('Reuse: R-001')) { throw 'Reuse check missing from comparison prompt' }
         Expect-Failure { & $builder -Stage comparison -WorkingDirectory $testRoot -ClaudeReviewPath 'relative.md' -AllowedToolsPath $allowedToolsPath } 'existing absolute'
     }
     Test-Case 'claude-review-allowlist-is-explicit-scoped-and-persistent' {
@@ -602,6 +607,92 @@ try {
         }
         New-Item -ItemType Directory -Path (Join-Path $run.run_directory 'claude-evaluation.md') | Out-Null
         Expect-Failure { & $storageScript -RepositoryPath $fixtureRepo -Variant codex-led -RunDirectory $run.run_directory } 'regular file'
+        Remove-Item -LiteralPath (Join-Path $run.run_directory 'claude-evaluation.md')
+        foreach ($artifact in @('timing-input.json', 'timing.json')) {
+            $artifactPath = Join-Path $run.run_directory $artifact
+            New-Item -ItemType Directory -Path $artifactPath | Out-Null
+            Expect-Failure { & $storageScript -RepositoryPath $fixtureRepo -Variant codex-led -RunDirectory $run.run_directory } 'regular file'
+            Remove-Item -LiteralPath $artifactPath
+        }
+    }
+    function New-TimingInput {
+        return @{
+            schema_version = 1; started_at_unix_ms = 1000000; report_at_unix_ms = 1300000
+            stages = @{
+                preparation = @{ started_at_unix_ms = 1000000; completed_at_unix_ms = 1020000 }
+                claude_review = @{ started_at_unix_ms = 1020000; completed_at_unix_ms = 1120000 }
+                codex_review = @{ started_at_unix_ms = 1040000; completed_at_unix_ms = 1140000 }
+                pr_discussion = @{ status = 'skipped'; reason = 'Not a PR review' }
+                comparison = @{ started_at_unix_ms = 1150000; completed_at_unix_ms = 1240000 }
+                adjudication_reporting = @{ started_at_unix_ms = 1250000; completed_at_unix_ms = 1300000 }
+            }
+        }
+    }
+    $timingInputPath = Join-Path $testRoot 'timing-input.json'
+    $timingOutputPath = Join-Path $testRoot 'timing.json'
+    $comparisonTimingPath = Join-Path $testRoot 'comparison-timing.md'
+    function Measure-Timing($Data, [string]$Comparison = 'Reuse timing: {"started_at_unix_ms":1180000,"completed_at_unix_ms":1210000}') {
+        Write-Json $timingInputPath $Data
+        [IO.File]::WriteAllText($comparisonTimingPath, $Comparison)
+        & $timingScript -InputPath $timingInputPath -ComparisonReportPath $comparisonTimingPath -OutputPath $timingOutputPath | ConvertFrom-Json
+    }
+    Test-Case 'stage-timing-concurrency-nesting-and-report' {
+        $result = Measure-Timing (New-TimingInput)
+        if ($result.total_seconds -ne 300 -or $result.independent_reviews.duration_seconds -ne 120 -or
+            $result.independent_reviews_overlap_seconds -ne 80 -or $result.stages.reuse_check.duration_seconds -ne 30 -or
+            $result.comparison_excluding_reuse_seconds -ne 60 -or $result.other_seconds -ne 20 -or
+            $result.stages.pr_discussion.status -ne 'skipped') { throw 'Stage timing double-counted overlap, reuse, or gaps.' }
+        if ($result.report_text -notmatch 'Independent reviews \(wall time\): 2m 00s' -or
+            $result.report_text -notmatch 'Reuse check: 30s' -or $result.report_text -notmatch 'not additive' -or
+            (Get-Content $timingOutputPath -Raw | ConvertFrom-Json).total_seconds -ne 300) { throw 'Saved timing or report text is incorrect.' }
+        $data = New-TimingInput
+        $data.stages.codex_review.started_at_unix_ms = 1125000
+        $result = Measure-Timing $data
+        if ($result.independent_reviews.duration_seconds -ne 120 -or $result.independent_reviews_overlap_seconds -ne 0) { throw 'Non-overlapping launches were treated as simultaneous.' }
+    }
+    Test-Case 'stage-timing-preserves-unavailable-measurements' {
+        foreach ($record in @('', 'Reuse timing: {"started_at_unix_ms":null,"completed_at_unix_ms":null}',
+            'Reuse timing: {"started_at_unix_ms":1140000,"completed_at_unix_ms":1210000}',
+            'Reuse timing: {"started_at_unix_ms":1210000,"completed_at_unix_ms":1180000}',
+            'Reuse timing: {bad json}',
+            "Reuse timing: {}`nReuse timing: not-json",
+            "Reuse timing: {}`nReuse timing: {}")) {
+            $result = Measure-Timing (New-TimingInput) $record
+            if ($result.stages.reuse_check.status -ne 'unavailable' -or $null -ne $result.stages.reuse_check.duration_seconds -or
+                $null -ne $result.comparison_excluding_reuse_seconds -or $result.total_seconds -ne 300) { throw 'Invalid reuse clock data became a measured duration.' }
+        }
+        $data = New-TimingInput
+        $data.stages.codex_review = @{ status = 'unavailable'; reason = 'Clock was not captured' }
+        $result = Measure-Timing $data
+        if ($null -ne $result.other_seconds -or $null -ne $result.independent_reviews_overlap_seconds -or
+            $result.report_text -notmatch 'Clock was not captured') { throw 'Missing review clock data was hidden or inferred.' }
+    }
+    Test-Case 'stage-timing-rejects-invalid-host-boundaries' {
+        $data = New-TimingInput; $data.stages.comparison.started_at_unix_ms = 1130000
+        Expect-Failure { Measure-Timing $data } 'Serial stage intervals overlap'
+        $data = New-TimingInput; $data.stages.claude_review.started_at_unix_ms = 999999
+        Expect-Failure { Measure-Timing $data } 'outside the run'
+        $data = New-TimingInput; $data.report_at_unix_ms = 999999
+        Expect-Failure { Measure-Timing $data } 'cutoff precedes'
+    }
+    Test-Case 'timed-wrapper-captures-completion-and-failure' {
+        $probe = New-Probe 'timed-wrapper' @('-Mode', 'rendezvous', '-EchoText', 'timed output') 'input'
+        $before = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $output = & $timedWrapper -InvocationPath $probe
+        $after = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $interval = Get-Content ($probe + '.timing.json') -Raw | ConvertFrom-Json
+        if ($interval.started_at_unix_ms -lt $before -or $interval.completed_at_unix_ms -gt $after -or
+            $interval.completed_at_unix_ms -lt $interval.started_at_unix_ms -or $interval.exit_code -ne 0 -or
+            ($output -join "`n") -notmatch 'timed output') { throw 'Wrapper timing or command output was lost.' }
+        $bad = New-Probe 'timed-wrapper-failure' @('-Mode', 'fail') 'input'
+        Expect-Failure { & $timedWrapper -InvocationPath $bad } 'exited 9'
+        if ((Get-Content ($bad + '.timing.json') -Raw | ConvertFrom-Json).exit_code -ne 9) { throw 'Failed invocation timing was lost.' }
+    }
+    Test-Case 'supervisor-keeps-finished-review-when-timing-is-unwritable' {
+        $probe = New-Probe 'timing-unwritable' @('-Mode', 'rendezvous', '-EchoText', 'kept output') 'input'
+        New-Item -ItemType Directory -Path ($probe + '.timing.json') | Out-Null
+        & $runner -InvocationPath $probe -TimeoutSeconds 15 3>$null | Out-Null
+        if (-not (Get-Content -LiteralPath ($probe + '.stdout') -Raw).Contains('kept output')) { throw 'Finished review output was lost.' }
     }
     Test-Case 'supervisor-concurrent-start-and-argument-preservation' {
         $firstReady = Join-Path $testRoot 'first-ready'; $secondReady = Join-Path $testRoot 'second-ready'
@@ -612,6 +703,11 @@ try {
         & $runner -InvocationPath $first,$second -TimeoutSeconds 15 | Out-Null
         $output = Get-Content -LiteralPath ($first + '.stdout') -Raw
         if (-not $output.Contains($literal) -or -not $output.Contains($stdinEvidence)) { throw 'Arguments or UTF-8 stdin were altered' }
+        $firstTiming = Get-Content ($first + '.timing.json') -Raw | ConvertFrom-Json
+        $secondTiming = Get-Content ($second + '.timing.json') -Raw | ConvertFrom-Json
+        if ($firstTiming.exit_code -ne 0 -or $secondTiming.exit_code -ne 0 -or
+            [Math]::Max($firstTiming.started_at_unix_ms, $secondTiming.started_at_unix_ms) -gt
+            [Math]::Min($firstTiming.completed_at_unix_ms, $secondTiming.completed_at_unix_ms)) { throw 'Supervisor did not record actual concurrent process intervals.' }
     }
     Test-Case 'supervisor-drains-both-streams' {
         $probe = New-Probe 'flood' @('-Mode', 'flood')
@@ -678,6 +774,8 @@ try {
         if (Test-Path -LiteralPath $ready) { throw 'Cancelled invocation started anyway' }
     }
 } finally {
+    Set-Location -LiteralPath $repoRoot
+    [Environment]::CurrentDirectory = $repoRoot
     $resolvedRoot = [IO.Path]::GetFullPath($testRoot)
     $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     if (-not $resolvedRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or

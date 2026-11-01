@@ -1,3 +1,4 @@
+#requires -Version 7.4
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateSet('independent', 'comparison')][string]$Stage,
@@ -65,9 +66,11 @@ Return the completed findings (or an explicit no-findings result) in your final 
     if ($PrCommentsPath -and (-not [IO.Path]::IsPathRooted($PrCommentsPath) -or -not (Test-Path -LiteralPath $PrCommentsPath -PathType Leaf))) {
         throw 'PrCommentsPath must be an existing absolute file path.'
     }
+    $allowedTools += ',Bash(date +%s%3N)'
     $promptPath = Join-Path $PSScriptRoot '../prompts/claude-evaluate.md'
+    $reuseCheckPath = Join-Path $PSScriptRoot '../prompts/reuse-check.md'
     $inputs = [ordered]@{ claude_review = $ClaudeReviewPath; codex_review = $CodexReviewPath; run_context = $RunContextPath; pr_comments = $PrCommentsPath } | ConvertTo-Json -Compress
-    $prompt = (Get-Content -LiteralPath $promptPath -Raw) + "`nInput paths (data): $inputs"
+    $prompt = (Get-Content -LiteralPath $promptPath -Raw) + (Get-Content -LiteralPath $reuseCheckPath -Raw) + "`nInput paths (data): $inputs"
 }
 
 # Quote revision expressions before Bash permission analysis; bare @{...} can require approval even for allowed git commands.
