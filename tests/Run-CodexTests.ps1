@@ -252,6 +252,14 @@ try {
                 $invocation.arguments -notcontains 'dontAsk' -or $invocation.arguments -notcontains 'fixture-model' -or
                 $invocation.arguments -contains '--dangerously-skip-permissions' -or $invocation.arguments -contains '--resume') { throw 'Incorrect Claude settings' }
             if ($mode -ne 'uncommitted' -and -not $invocation.standard_input.Contains($scopeBase + '...HEAD')) { throw 'Frozen diff scope missing' }
+            if (-not $invocation.standard_input.Contains("git diff '@{upstream}...HEAD'") -or
+                -not $invocation.standard_input.Contains("git rev-parse 'HEAD^{commit}'")) { throw 'Quoted revision guidance missing' }
+            if ($mode -eq 'uncommitted') {
+                if (-not $invocation.standard_input.Contains("git diff 'HEAD' -- .") -or
+                    -not $invocation.standard_input.Contains('git status --porcelain=v1 --untracked-files=all') -or
+                    -not $invocation.standard_input.Contains('Do not query upstream/tracking refs') -or
+                    -not $invocation.standard_input.Contains('Pass this scope and these command instructions to any native review subagents.')) { throw 'Uncommitted-only scope guidance missing' }
+            } elseif ($invocation.standard_input.Contains('Do not query upstream/tracking refs')) { throw 'Uncommitted-only restriction leaked into branch/PR review' }
             # Chained commands are denied unless every part is separately allowed.
             if (-not $invocation.standard_input.Contains('Run one command per call')) { throw 'Single-command guidance missing' }
             if (-not $invocation.standard_input.Contains('args="medium')) { throw 'Native review did not receive the default effort' }
@@ -264,7 +272,7 @@ try {
         Expect-Failure { & $builder -Stage independent -WorkingDirectory $scopeRepo -ReviewMode branch -BaseCommit $scopeBase -AllowedToolsPath $allowedToolsPath } 'requires a clean workspace'
         foreach ($mode in @('branch', 'pull_request')) {
             $combined = & $builder -Stage independent -WorkingDirectory $scopeRepo -ReviewMode $mode -BaseCommit $scopeBase -IncludeLocalChanges -AllowedToolsPath $allowedToolsPath | ConvertFrom-Json
-            if (-not $combined.standard_input.Contains('git diff <merge-base> (without ...HEAD)') -or
+            if (-not $combined.standard_input.Contains("git diff '<merge-base>' (replace the placeholder with the returned hash, without ...HEAD)") -or
                 -not $combined.standard_input.Contains('including all staged local changes')) { throw 'Combined scope omitted local changes.' }
         }
     }
@@ -275,6 +283,7 @@ try {
         if ($invocation.effort -ne 'medium' -or $invocation.arguments -contains '--resume') { throw 'Comparison effort or freshness incorrect' }
         foreach ($path in $inputPaths) { if (-not $invocation.standard_input.Contains(($path | ConvertTo-Json -Compress))) { throw 'Missing escaped input path' } }
         if (-not $invocation.standard_input.Contains('Run one command per call')) { throw 'Single-command guidance missing' }
+        if (-not $invocation.standard_input.Contains("git diff '@{upstream}...HEAD'")) { throw 'Comparison revision quoting guidance missing' }
         Expect-Failure { & $builder -Stage comparison -WorkingDirectory $testRoot -ClaudeReviewPath 'relative.md' -AllowedToolsPath $allowedToolsPath } 'existing absolute'
     }
     Test-Case 'claude-review-allowlist-is-explicit-scoped-and-persistent' {

@@ -11,9 +11,12 @@ Group: G-001
 Sources: C-001, X-002
 Disposition: CONFIRMED | REJECTED | UNCERTAIN
 Recommended final severity: high | medium | low (confirmed groups only)
+Location: <repository-relative file:line or file:start-end entries, defect site first, separated by `;`>
 Evidence: <file:line and concise reasoning>
 Disagreement: <none or material severity/root-cause disagreement>
 ```
+
+Every group, including rejected ones, needs a Location line verified against this workspace. Use repository-relative paths, never absolute or worktree paths. When a finding's reported line is wrong or missing, give the correct line.
 
 Codex will inspect source and make the final decisions, recording disposition overrides. Do not calculate metrics or write an adjudication ledger.
 

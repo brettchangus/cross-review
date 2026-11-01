@@ -31,9 +31,12 @@ Group: G-001
 Sources: C-001, X-002
 Disposition: CONFIRMED
 Recommended final severity: high
+Location: <repository-relative file:line or file:start-end entries, defect site first, separated by `;`>
 Evidence: <file:line and concise reasoning>
 Disagreement: <none or concise explanation>
 ```
+
+Every group, including rejected ones, needs a Location line verified against this workspace. Use repository-relative paths, never absolute or worktree paths. When a finding's reported line is wrong or missing, give the correct line.
 
 Ensure every initial provenance ID appears in exactly one group's Sources field. Do not repeat that mapping in a coverage table. Do not calculate final effectiveness metrics; Claude's final adjudication and the deterministic calculator do that after validating your proposed groups.
 
