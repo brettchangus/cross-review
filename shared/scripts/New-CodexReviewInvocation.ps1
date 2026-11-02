@@ -17,7 +17,7 @@ param(
     [string]$ExecutablePath,
 
     [ValidateSet('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')]
-    [string]$ReasoningEffort,
+    [string]$ReasoningEffort = 'high',
 
     [switch]$StructuredDiagnostics
 )

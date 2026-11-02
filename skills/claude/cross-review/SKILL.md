@@ -49,7 +49,7 @@ Use [prompts/codex-evaluate.md](prompts/codex-evaluate.md) followed by [prompts/
 
 Retain the current UTC timestamp as `invoked_at` and Unix epoch milliseconds as `invoked_at_unix_ms`; do not use them as the timed review start.
 
-Parse optional `pr <positive-integer-or-GitHub-URL>`, `--effort <low|medium|high|xhigh>`, and `--debug` in any order with `scripts/Resolve-ReviewArguments.ps1 -ReviewArguments <tokens>`. Retain its `debug` boolean for report rendering (false unless `--debug` is supplied). Retain its `effort` as `<selected-effort>` throughout the run; omitted effort defaults to `medium`. The parser rejects unknown tokens, duplicates, missing values, and invalid IDs before lookup. The argument controls the independent reviewers and comparison process; the already-running Claude session's adjudication effort is controlled by that session and cannot be changed by this skill argument.
+Parse optional `pr <positive-integer-or-GitHub-URL>`, `--effort <low|medium|high|xhigh>`, and `--debug` in any order with `scripts/Resolve-ReviewArguments.ps1 -ReviewArguments <tokens>`. Retain its `debug` boolean for report rendering (false unless `--debug` is supplied). Retain its `effort` as `<selected-effort>` for Claude (default `medium`) and `codex_effort` as `<codex-effort>` for Codex (default `high`). An explicit `--effort` sets both values. The parser rejects unknown tokens, duplicates, missing values, and invalid IDs before lookup. The argument controls the independent reviewers and comparison process; the already-running Claude session's adjudication effort is controlled by that session and cannot be changed by this skill argument.
 
 Resolve the repository root, exact current branch, local HEAD, optional origin URL, and stable repository identity, and detect local changes. Issue both commands in a single tool call: neither depends on the other, and every extra round trip here is time the user waits before the confirmation prompt.
 
@@ -134,7 +134,7 @@ Issue the two preflight commands below in a single tool call. Neither depends on
   [-ClaudeModel <session-Claude-model>] `
   -ClaudeEffort <selected-effort> `
   -ClaudeEffortSource explicit `
-  -CodexReasoningEffort <selected-effort>
+  -CodexReasoningEffort <codex-effort>
 ```
 
 The estimator uses history only from the same review mode, then applies comparable-size and repository preferences. If `review_size.has_changes` is false, finish with nothing to review.
@@ -143,7 +143,7 @@ Retain the estimator's `base_commit` and `head_commit`. These are the preflight'
 
 Claude's native review runs at the explicit `/code-review` level `<selected-effort>`, so the helper reports that level with source `explicit`. For the Claude model, use the current Claude Code session model ID when it is exposed to this invocation, and pass `-ClaudeModel` only when it is known. Do not infer it from settings because `/model` may have changed it during the session.
 
-Codex's independent review runs at the explicit reasoning effort `<selected-effort>`, passed to the review invocation itself, so the helper reports it with source `explicit`. `codex doctor --json` exposes the effective model but not the effective reasoning effort, so an unpinned run would inherit whatever `model_reasoning_effort` happens to sit in the user's `config.toml` and be recorded as an unresolved CLI default. Pinning both reviewers and the comparison keeps the run reproducible. The same level name does not imply identical reasoning across providers. If a provider reports a cap or fallback, disclose the effective level rather than claiming the request was honored.
+Codex's independent review runs at the explicit reasoning effort `<codex-effort>`, passed to the review invocation itself, so the helper reports it with source `explicit`. `codex doctor --json` exposes the effective model but not the effective reasoning effort, so an unpinned run would inherit whatever `model_reasoning_effort` happens to sit in the user's `config.toml` and be recorded as an unresolved CLI default. Pinning both reviewers and the comparison keeps the run reproducible. The same level name does not imply identical reasoning across providers. If a provider reports a cap or fallback, disclose the effective level rather than claiming the request was honored.
 
 The helper uses read-only `codex doctor --json` diagnostics for the Codex *model*. It does not invoke either review model. An explicit Codex configuration is reported exactly; `<default>` remains unresolved. Continue the normal tool-availability preflight if model detection is partial or unavailable.
 
@@ -165,8 +165,8 @@ Workspace: This checkout (already at the reviewed commit) | Detached worktree at
 
 Tools:
   Claude: native /code-review (<scope>) — <model ID or exact model unavailable>, effort <level or unavailable>
-  Codex review: native codex exec review (<scope>) — <model ID or CLI default unresolved>, reasoning <selected-effort> (explicit)
-  Codex comparison: native codex exec — <same model label>, reasoning <selected-effort> (explicit)
+  Codex review: native codex exec review (<scope>) — <model ID or CLI default unresolved>, reasoning <codex-effort> (explicit)
+  Codex comparison: native codex exec — <same model label>, reasoning <codex-effort> (explicit)
   Claude final adjudicator: this session — <model and effort or unavailable; independent of --effort>
 
 Review size: <band> — <files> files, +<added>/-<deleted> lines, <commits> commits, <binary> binary files[, <oversized> oversized untracked files estimated]
@@ -250,7 +250,7 @@ $invocation = (& "${CLAUDE_SKILL_DIR}/scripts/New-CodexReviewInvocation.ps1" `
   [-BaseCommit <target-commit>] `
   -OutputPath <temporary-run-directory>/codex-independent.md `
   [-Model <resolved-model>] `
-  -ReasoningEffort <selected-effort>) -join "`n"
+  -ReasoningEffort <codex-effort>) -join "`n"
 
 [IO.File]::WriteAllText('<temporary-run-directory>/codex-invocation.json', $invocation, [Text.UTF8Encoding]::new($false))
 & "${CLAUDE_SKILL_DIR}/scripts/Invoke-ReviewWithTiming.ps1" -InvocationPath '<temporary-run-directory>/codex-invocation.json'
@@ -279,7 +279,7 @@ The helper pins Codex with an exec-level `--cd`, so the review runs in the revie
 
 Never add a positional prompt to a scoped `codex exec review` invocation. The installed Codex CLI treats its optional `[PROMPT]` as custom review instructions and some builds reject it when `--base` or `--uncommitted` selects the scope. The helper always adds `--sandbox read-only --ephemeral`; `.reviews/**` is already excluded from local review input and a detached review worktree contains no review bookkeeping.
 
-When an exact Codex model was resolved, pass it explicitly to both invocations. The independent review and comparison both use `<selected-effort>` reasoning, recorded with source `explicit`. Omit an unresolved model and label it a default in output. Record each stage's settings separately as defined in the artifact contract and report both in the final output.
+When an exact Codex model was resolved, pass it explicitly to both invocations. The independent review and comparison both use `<codex-effort>` reasoning, recorded with source `explicit`. Omit an unresolved model and label it a default in output. Record each stage's settings separately as defined in the artifact contract and report both in the final output.
 
 If the review fails or is unusable, remove the temporary run data, clean up the review workspace as the invariants require, and stop without adjudication or history.
 
@@ -317,7 +317,7 @@ $comparison = (& "${CLAUDE_SKILL_DIR}/scripts/New-CodexComparisonInvocation.ps1"
   [-PrCommentsPath <run_directory>/pr-comments.json] `
   -OutputPath <run_directory>/codex-evaluation.md `
   [-Model <resolved-model>] `
-  -ReasoningEffort <selected-effort>) -join "`n"
+  -ReasoningEffort <codex-effort>) -join "`n"
 
 [IO.File]::WriteAllText('<temporary-run-directory>/comparison-invocation.json', $comparison, [Text.UTF8Encoding]::new($false))
 & "${CLAUDE_SKILL_DIR}/scripts/Invoke-ReviewWithTiming.ps1" -InvocationPath '<temporary-run-directory>/comparison-invocation.json'

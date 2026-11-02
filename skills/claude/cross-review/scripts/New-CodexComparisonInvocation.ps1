@@ -8,7 +8,7 @@ param(
     [string]$PrCommentsPath,
     [Parameter(Mandatory)][string]$OutputPath,
     [string]$Model,
-    [ValidateSet('low', 'medium', 'high', 'xhigh')][string]$ReasoningEffort = 'medium'
+    [ValidateSet('low', 'medium', 'high', 'xhigh')][string]$ReasoningEffort = 'high'
 )
 
 $ErrorActionPreference = 'Stop'

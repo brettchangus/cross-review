@@ -98,6 +98,7 @@ if (@($invocations | Where-Object is_codex).Count -gt 0) {
     }
 }
 
+$reviewProcessPath = Get-ReviewProcessPath -ToolDirectory (Join-Path (Split-Path -Parent $invocations[0].path) 'rg-tools')
 try {
     foreach ($entry in $invocations) {
         $fullPath = $entry.path
@@ -122,6 +123,7 @@ try {
         $info.FileName = $commandPath
         $info.WorkingDirectory = [string]$invocation.working_directory
         $info.UseShellExecute = $false
+        $info.Environment['PATH'] = $reviewProcessPath
         $info.CreateNoWindow = $true
         $info.RedirectStandardInput = $true
         $info.RedirectStandardOutput = $true

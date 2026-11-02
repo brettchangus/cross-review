@@ -4,6 +4,7 @@ param([string[]]$ReviewArguments = @())
 
 $ErrorActionPreference = 'Stop'
 $effort = 'medium'
+$codexEffort = 'high'
 $effortSeen = $false
 $debug = $false
 $pullRequestId = $null
@@ -36,9 +37,10 @@ for ($index = 0; $index -lt $ReviewArguments.Count; $index++) {
             $candidate = $ReviewArguments[$index].ToLowerInvariant()
             if ($candidate -notin @('low', 'medium', 'high', 'xhigh')) { throw 'Effort must be low, medium, high, or xhigh.' }
             $effort = $candidate
+            $codexEffort = $candidate
             $effortSeen = $true
         }
         default { throw "Unknown cross-review argument: $token" }
     }
 }
-[ordered]@{ pull_request_id = $pullRequestId; pr_url = $prUrl; effort = $effort; effort_source = 'explicit'; debug = $debug } | ConvertTo-Json -Compress
+[ordered]@{ pull_request_id = $pullRequestId; pr_url = $prUrl; effort = $effort; codex_effort = $codexEffort; effort_source = 'explicit'; debug = $debug } | ConvertTo-Json -Compress

@@ -91,12 +91,12 @@ Schema version 3. Splice the estimator's own `review_size` and `estimate` object
     "claude_model_source": "session_context",
     "claude_effort_source": "explicit",
     "codex_model": "gpt-5.6-sol",
-    "codex_reasoning_effort": "medium",
+    "codex_reasoning_effort": "high",
     "codex_model_source": "codex_doctor",
     "codex_reasoning_effort_source": "explicit",
     "codex_comparison_model": "gpt-5.6-sol",
     "codex_comparison_model_source": "codex_doctor",
-    "codex_comparison_reasoning_effort": "medium",
+    "codex_comparison_reasoning_effort": "high",
     "codex_comparison_reasoning_effort_source": "explicit"
   },
   "review_size": "<the estimator's review_size object, verbatim>",
@@ -112,7 +112,7 @@ Schema version 3. Splice the estimator's own `review_size` and `estimate` object
 
 Model and effort values are nullable, because not every CLI exposes an exact effective default before invocation. Their `_source` fields are `session_context`, `explicit`, `codex_doctor`, `cli_default_unresolved`, or `unavailable`. Store JSON `null` when a value is unresolved and render a fallback such as `CLI default (exact model unresolved)` in human-readable output only. Never store that label as if it were an identifier.
 
-The existing `codex_model`, `codex_reasoning_effort`, and their source fields describe the independent review. Record the comparison separately in `codex_comparison_model`, `codex_comparison_model_source`, `codex_comparison_reasoning_effort`, and `codex_comparison_reasoning_effort_source`. Copy the independent review's model and model source into the comparison model fields; use the same selected effort (`low`, `medium`, `high`, or `xhigh`, default `medium`) for both stages, with source `explicit`. Show both stages' settings in preflight and the saved report's `Provenance` section, and retain them in structured run artifacts. The history writer preserves these fields through the run context's `tooling` object; older history entries without comparison fields remain valid.
+The existing `codex_model`, `codex_reasoning_effort`, and their source fields describe the independent review. Record the comparison separately in `codex_comparison_model`, `codex_comparison_model_source`, `codex_comparison_reasoning_effort`, and `codex_comparison_reasoning_effort_source`. Copy the independent review's model and model source into the comparison model fields; use the same selected Codex effort (`low`, `medium`, `high`, or `xhigh`, default `high`) for both stages, with source `explicit`. Show both stages' settings in preflight and the saved report's `Provenance` section, and retain them in structured run artifacts. The history writer preserves these fields through the run context's `tooling` object; older history entries without comparison fields remain valid.
 
 ## Finding IDs and severity
 
@@ -331,7 +331,7 @@ In the version-4 run context, keep `pr_metadata`, `claude_review`, `codex_review
 }
 ```
 
-These are fields inside `tooling`, not another top-level object. Set `claude_comparison_effort` to the same selected effort as both independent reviews. Omit the version-3 `codex_comparison_*` fields: Codex is not running that comparison. If the current Codex session exposes its model/effort, record them with `session_context`; do not use Codex CLI diagnostics as a proxy for this session. The skill's effort argument does not change the active adjudicator session. An explicit Claude model is passed unchanged to both Claude stages. Native review subagents can use other models; do not infer the main session model from a multi-model usage breakdown. Preserve the honest model/effort labels in preflight, the saved report's `Provenance` section, and structured run artifacts.
+These are fields inside `tooling`, not another top-level object. Set `claude_comparison_effort` to the same selected Claude effort as the independent Claude review (default `medium`); Codex's independent review defaults to `high`. An explicit `--effort` overrides both providers. Omit the version-3 `codex_comparison_*` fields: Codex is not running that comparison. If the current Codex session exposes its model/effort, record them with `session_context`; do not use Codex CLI diagnostics as a proxy for this session. The skill's effort argument does not change the active adjudicator session. An explicit Claude model is passed unchanged to both Claude stages. Native review subagents can use other models; do not infer the main session model from a multi-model usage breakdown. Preserve the honest model/effort labels in preflight, the saved report's `Provenance` section, and structured run artifacts.
 
 ### Adjudication
 

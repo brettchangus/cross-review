@@ -54,13 +54,13 @@ The comparison pass also runs a reuse check: it reads the changed lines and sear
 
 For PR reviews, the skill captures existing text comment threads after the independent reviews finish. The comparison pass matches them to model findings and checks comment-only concerns against the frozen source. The final report identifies findings already discussed on the PR and lists verified comment-only issues under `Existing PR discussion`. Those issues do not count toward either model's effectiveness metrics. PR comment retrieval uses a capable provider MCP operation or its authenticated CLI fallback. GitHub capture includes conversation comments, review summaries, inline threads, and all replies, retaining resolved/outdated state and current/original locations.
 
-Both reviewers and the comparison pass run at the selected effort, `medium` by default. Pinning each stage makes runs reproducible; the host's final adjudication uses its current session effort.
+Codex stages default to `high` reasoning effort; Claude stages default to `medium`. An explicit `--effort` sets both providers to the requested level. Pinning each stage makes runs reproducible; the host's final adjudication uses its current session effort.
 
 ## Requirements
 
 - [Claude Code](https://code.claude.com) with the native `/code-review` skill
 - [Codex CLI](https://learn.chatgpt.com/docs/non-interactive-mode) with `codex exec review`
-- Git
+- Git and ripgrep (`rg`)
 - PowerShell 7.4 or later (`pwsh`) for both skills and the installer; Windows PowerShell 5.1 is not supported
 - For Azure DevOps PR reviews: Azure DevOps MCP (preferred), or authenticated Azure CLI with the `azure-devops` extension (fallback)
 - For GitHub PR reviews: capable GitHub MCP operations (preferred), or authenticated [GitHub CLI](https://cli.github.com/) (`gh`, fallback)
@@ -69,7 +69,7 @@ Metadata and discussion operations are checked separately; an MCP connection tha
 
 Uncommitted and branch reviews need no provider API authentication. A remote branch comparison uses Git authentication; local main/master comparisons work without a remote.
 
-The Codex-led skill needs a native `claude` executable on `PATH` and a complete native Codex installation. It discovers `codex.exe` from `PATH` or standard local installation locations, and requires `codex-code-mode-host.exe` beside it. The Codex reviewer also needs write access to its runtime home under `CODEX_HOME`; its source-review sandbox remains read-only.
+The Codex-led skill needs a native `claude` executable on `PATH` and a complete native Codex installation. It discovers `codex.exe` from `PATH` or standard local installation locations, and requires `codex-code-mode-host.exe` beside it. Both launchers prefer `rg` from the Codex installation because a user-private WinGet package can be invisible to Windows' restricted review identity. Otherwise they resolve it from the inherited and registered user/machine paths, following links to the executable. They copy only `rg` into a dedicated temporary directory beside the invocation manifests and prepend that directory, leaving the inherited `PATH` entries in their original order. Missing or disconnected drives are skipped during discovery. This handles stale host environments without changing persistent paths. Missing `rg` stops the launch with an installation message. The Codex reviewer also needs write access to its runtime home under `CODEX_HOME`; its source-review sandbox remains read-only.
 
 > [!NOTE]
 > The skills are developed and tested on Windows.
@@ -144,7 +144,7 @@ Provider detection uses the branch tracking remote, then origin, then a sole rem
 
 With `--debug`, preflight shows `Repository provider: GitHub (github.com)`, `Azure DevOps (<host>)`, `Unknown (<host or local remote>)`, or `Local Git (no remote)`, independently of whether PR lookup ran. PR metadata separately shows MCP/CLI and any fallback reason. Provider and host are also included in the saved report's `Provenance` section and structured run artifacts.
 
-Use `--effort low|medium|high|xhigh` to set the two independent reviewers and comparison pass. The default is `medium`. The option can appear before or after `pr <id>`. It does not change the effort of the already-running Claude or Codex session that makes the final decisions; the preflight shows that session's effort when available. Model or organization limits may cap a requested level, so any reported fallback is disclosed in the result.
+Use `--effort low|medium|high|xhigh` to set the two independent reviewers and comparison pass. Without the option, Codex stages use `high` and Claude stages use `medium`. The option can appear before or after `pr <id>`. It does not change the effort of the already-running Claude or Codex session that makes the final decisions; the preflight shows that session's effort when available. Model or organization limits may cap a requested level, so any reported fallback is disclosed in the result.
 
 Add `--debug` to include the diagnostic `Run issues` section in the saved report and chat output, including early stop messages. It defaults to off and can appear anywhere alongside the other options. Blocking errors and material review limitations are still reported.
 
@@ -265,9 +265,9 @@ The worktree is kept until adjudication finishes, so every source check sees the
 
 | Stage | Setting |
 |---|---|
-| Claude independent review | `/code-review <selected-effort>` |
-| Codex independent review | reasoning `<selected-effort>` |
-| Comparison pass | `<selected-effort>` |
+| Claude independent review | `/code-review <selected-effort>` (default `medium`) |
+| Codex independent review | reasoning `<codex-effort>` (default `high`) |
+| Comparison pass | Codex: `<codex-effort>`; Claude: `<selected-effort>` |
 
 Every launched stage is pinned explicitly. Without that, Claude would reuse the level from your last `/code-review` and Codex would use whatever `model_reasoning_effort` is in your configuration, which the skill cannot read back. Effort names are provider-specific and do not imply equal reasoning budgets.
 

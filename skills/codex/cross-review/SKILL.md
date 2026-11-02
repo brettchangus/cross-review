@@ -5,7 +5,7 @@ description: Run independent native Claude and Codex code reviews of an Azure De
 
 # Codex-led cross-review
 
-Run the workflow in this Codex session. Accept `$cross-review [--debug] [--effort low|medium|high|xhigh] [pr <positive-integer-or-GitHub-URL>]`, with options in any order. Parse the tokens before lookup with `scripts/Resolve-ReviewArguments.ps1 -ReviewArguments <tokens>`; its default is `medium` and it rejects unknown or repeated arguments. Retain its `debug` boolean for report rendering (false unless `--debug` is supplied). Retain its `effort` as `<selected-effort>` throughout the run. Resolve `skill_dir` from this loaded SKILL.md's directory, not the repository being reviewed. All helper paths below are relative to that installed directory. Run scripts with PowerShell 7.4 or later (`pwsh`).
+Run the workflow in this Codex session. Accept `$cross-review [--debug] [--effort low|medium|high|xhigh] [pr <positive-integer-or-GitHub-URL>]`, with options in any order. Parse the tokens before lookup with `scripts/Resolve-ReviewArguments.ps1 -ReviewArguments <tokens>`; it defaults Claude to `medium` and Codex to `high`, and rejects unknown or repeated arguments. Retain its `debug` boolean for report rendering (false unless `--debug` is supplied). Retain its `effort` as `<selected-effort>` for Claude and `codex_effort` as `<codex-effort>` for Codex. An explicit `--effort` sets both values. Resolve `skill_dir` from this loaded SKILL.md's directory, not the repository being reviewed. All helper paths below are relative to that installed directory. Run scripts with PowerShell 7.4 or later (`pwsh`).
 
 ## Boundaries
 
@@ -62,13 +62,13 @@ Run from the original repository root. Batch estimation, CLI availability/help c
   -RepositoryId <id> -RepositoryName <name>
 & "<skill_dir>/scripts/Get-ReviewModelInfo.ps1" `
   -DiscoverClaudeConfiguration -ReviewWorkspace <original-root> `
-  -ClaudeEffort <selected-effort> -ClaudeEffortSource explicit -CodexReasoningEffort <selected-effort> `
+  -ClaudeEffort <selected-effort> -ClaudeEffortSource explicit -CodexReasoningEffort <codex-effort> `
   -RequireCompleteCodexExecutable
 ```
 
 Retain the estimator's `base_commit`, `head_commit`, `review_size`, and `estimate`; stop if `has_changes` is false. Resolve native `claude` and use the diagnostic's `codex.executable` for Codex. It selects a native `codex.exe` only when `codex-code-mode-host.exe` is beside it; a `codex.exe` from `.sandbox-bin` without that host is incomplete for this review. Stop if no complete executable is found. Check Claude supports print mode, stream-json, explicit effort, no session persistence, and the permission flags used by the helper. Check the resolved Codex executable supports the scoped review invocation, JSONL event output, and an explicit `approval_policy="never"` configuration override. Report unsupported capabilities before approval.
 
-The diagnostics describe the independent Codex CLI, not this session. They resolve Claude's configured model from `ANTHROPIC_MODEL`, settings environment, settings model, then `ANTHROPIC_DEFAULT_MODEL`, using `CLAUDE_CONFIG_DIR` and file-based managed settings where present; an alias such as `opus` remains an alias, not a guessed version. Pass a resolved Claude selection explicitly to both Claude calls and record it as explicit in run artifacts; if unresolved, label the CLI default unresolved. The Codex diagnostic and reviewer subprocess use the same complete executable and `CODEX_HOME`: an explicit environment value, or the `.codex` directory under `USERPROFILE`. If Codex's model remains unresolved, do not infer it from a config file the subprocess will not use. Pass `<selected-effort>` to both independent reviewers and the comparison process, recording each as explicitly requested. Record this session's adjudicator model/effort only if exposed: a skill argument cannot change the effort of this already-running Codex session. Do not assume the two CLIs' effort scales correspond or that a model supports every level. If the provider reports a cap or fallback, disclose the effective level rather than claiming the request was honored.
+The diagnostics describe the independent Codex CLI, not this session. They resolve Claude's configured model from `ANTHROPIC_MODEL`, settings environment, settings model, then `ANTHROPIC_DEFAULT_MODEL`, using `CLAUDE_CONFIG_DIR` and file-based managed settings where present; an alias such as `opus` remains an alias, not a guessed version. Pass a resolved Claude selection explicitly to both Claude calls and record it as explicit in run artifacts; if unresolved, label the CLI default unresolved. The Codex diagnostic and reviewer subprocess use the same complete executable and `CODEX_HOME`: an explicit environment value, or the `.codex` directory under `USERPROFILE`. If Codex's model remains unresolved, do not infer it from a config file the subprocess will not use. Pass `<codex-effort>` to the independent Codex reviewer and `<selected-effort>` to both Claude stages, recording each as explicitly requested. Record this session's adjudicator model/effort only if exposed: a skill argument cannot change the effort of this already-running Codex session. Do not assume the two CLIs' effort scales correspond or that a model supports every level. If the provider reports a cap or fallback, disclose the effective level rather than claiming the request was honored.
 
 Display the preflight to the user. Lead with bold Repo, Branch, and Review Scope fields in that order. For PR mode, include the PR number in Review Scope (`Pull request #<id>`) in preflight and saved provenance even without `--debug`. For branch mode, use `Compare <source-branch> vs <target-branch>` in Review Scope even without `--debug`, naming the actual resolved comparison target; append ` + uncommitted local changes` when applicable. Show models and effort sources in regular supporting text, at the same size and weight as other supporting sections. Include the additional scope/revision fields below only when parsed debug is true; use Unknown (local remote) when no host is available. Follow the provider workflow for repository and fork labels:
 
@@ -86,7 +86,7 @@ PR metadata: <provider MCP, provider CLI fallback with reason, or why not querie
 Workspace: <original checkout or detached worktree at source commit>
 [End debug-only details]
 Claude independent review: native code-review — <configured model or default unresolved, with discovery source>, <selected-effort> (explicit)
-Codex independent review: native exec review — <model or default unresolved, with discovery source>, <selected-effort> (explicit)
+Codex independent review: native exec review — <model or default unresolved, with discovery source>, <codex-effort> (explicit)
 Claude comparison: <same Claude model or default unresolved>, <selected-effort> (explicit)
 Codex final adjudicator: this session — <model and effort or unavailable>
 Review size: <band, files, added/deleted lines, commits, binary/oversized files>
@@ -134,7 +134,7 @@ Build two invocation manifests using the helpers, saving their JSON outputs outs
 & "<skill_dir>/scripts/New-CodexReviewInvocation.ps1" `
   -ReviewMode <mode> -WorkingDirectory <review-workspace> -ExecutablePath <diagnostic codex.executable> `
   [-BaseCommit <frozen-target-commit>] -OutputPath '<temporary-run-directory>/codex-independent.md' `
-  -StructuredDiagnostics [-Model <CLI-model>] -ReasoningEffort <selected-effort>
+  -StructuredDiagnostics [-Model <CLI-model>] -ReasoningEffort <codex-effort>
 
 & "<skill_dir>/scripts/New-ClaudeReviewInvocation.ps1" `
   -Stage independent -ReviewMode <mode> -WorkingDirectory <review-workspace> `

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('rendezvous', 'wait', 'fail', 'flood', 'hold-open')][string]$Mode,
+    [ValidateSet('rendezvous', 'wait', 'fail', 'flood', 'hold-open', 'search')][string]$Mode,
     [string]$ReadyPath,
     [string]$PeerPath,
     [string]$EchoText
@@ -14,6 +14,15 @@ if ($PeerPath) {
     }
 }
 switch ($Mode) {
+    'search' {
+        (Get-Command rg -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        foreach ($command in @('git', 'pwsh', 'codex')) {
+            $resolved = Get-Command $command -CommandType Application -ErrorAction Stop | Select-Object -First 1
+            [Console]::Out.WriteLine("${command}: $($resolved.Source)")
+        }
+        & rg --version
+        if ($LASTEXITCODE -ne 0) { throw 'rg could not execute in the reviewer process.' }
+    }
     'wait' { Start-Sleep -Seconds 60 }
     'fail' { [Console]::Error.WriteLine('deliberate failure'); exit 9 }
     'flood' {

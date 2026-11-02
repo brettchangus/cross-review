@@ -4,6 +4,7 @@ param([Parameter(Mandatory)][string]$InvocationPath)
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'ReviewCliEnvironment.ps1')
 $path = (Resolve-Path -LiteralPath $InvocationPath).ProviderPath
 $invocation = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
 $executable = [string]$invocation.executable
@@ -12,8 +13,11 @@ $arguments = @($invocation.arguments | ForEach-Object { [string]$_ })
 $startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $exitCode = $null
 $priorProcessDirectory = [Environment]::CurrentDirectory
+$priorSearchPath = $env:PATH
+$reviewProcessPath = Get-ReviewProcessPath -ToolDirectory (Join-Path (Split-Path -Parent $path) 'rg-tools')
 Push-Location -LiteralPath ([string]$invocation.working_directory)
 try {
+    $env:PATH = $reviewProcessPath
     # Native stderr is reviewer progress; only the exit code decides failure.
     $ErrorActionPreference = 'Continue'
     if ($invocation.standard_input) {
@@ -26,6 +30,7 @@ try {
     if ($exitCode -ne 0) { throw "Review invocation exited $exitCode." }
 } finally {
     $completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $env:PATH = $priorSearchPath
     Pop-Location
     [Environment]::CurrentDirectory = $priorProcessDirectory
     $timing = [ordered]@{ started_at_unix_ms = $startedAt; completed_at_unix_ms = $completedAt; exit_code = $exitCode }

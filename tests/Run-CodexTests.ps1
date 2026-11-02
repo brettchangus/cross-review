@@ -375,6 +375,126 @@ try {
         }
         if (@(Get-ChildItem -LiteralPath $firstProfile -Force).Count -ne 0) { throw 'First-run home probe left files behind' }
     }
+    $rgName = if ($IsWindows) { 'rg.exe' } else { 'rg' }
+    function Assert-IsolatedSearchPath([string]$Result, [string]$Inherited, [string]$Contents) {
+        $directory = ($Result -split [regex]::Escape([string][IO.Path]::PathSeparator))[0]
+        $expected = if ($Inherited) { $directory + [IO.Path]::PathSeparator + $Inherited } else { $directory }
+        if ($Result -cne $expected) { throw 'Inherited PATH entries were reordered or changed.' }
+        $files = @(Get-ChildItem -LiteralPath $directory -Force)
+        if ($files.Count -ne 1 -or $files[0].Name -ne $rgName -or
+            [IO.File]::ReadAllText($files[0].FullName) -cne $Contents) { throw 'Isolated tool directory does not contain exactly the selected rg.' }
+    }
+    Test-Case 'review-path-recovers-rg-from-registered-paths' {
+        . (Join-Path $package 'scripts/ReviewCliEnvironment.ps1')
+        $stale = Join-Path $testRoot 'stale host path'
+        $userTools = Join-Path $testRoot 'registered user tools'
+        $machineTools = Join-Path $testRoot 'registered machine tools'
+        $toolDirectory = Join-Path $testRoot 'isolated lookup tools'
+        New-Item -ItemType Directory -Path $stale,$userTools,$machineTools | Out-Null
+        [IO.File]::WriteAllText((Join-Path $userTools $rgName), 'user rg')
+        [IO.File]::WriteAllText((Join-Path $machineTools $rgName), 'machine rg')
+        $separator = [IO.Path]::PathSeparator
+        $originalPath = $env:PATH
+        $result = Get-ReviewProcessPath -ToolDirectory $toolDirectory -PathValue $stale -UserPath $userTools -MachinePath $machineTools -BundledBinRoot ''
+        Assert-IsolatedSearchPath $result $stale 'user rg'
+        $result = Get-ReviewProcessPath -ToolDirectory $toolDirectory -PathValue $stale -UserPath '' -MachinePath $machineTools -BundledBinRoot ''
+        Assert-IsolatedSearchPath $result $stale 'machine rg'
+        $inherited = "$machineTools$separator$stale"
+        $result = Get-ReviewProcessPath -ToolDirectory $toolDirectory -PathValue $inherited -UserPath $userTools -MachinePath '' -BundledBinRoot ''
+        Assert-IsolatedSearchPath $result $inherited 'machine rg'
+        Expect-Failure { Get-ReviewProcessPath -ToolDirectory $toolDirectory -PathValue $stale -UserPath '' -MachinePath '' -BundledBinRoot '' } 'Install ripgrep'
+        $bundleRoot = Join-Path $testRoot 'codex tools'
+        $bundle = Join-Path $bundleRoot 'fixture-version'
+        New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $bundle $rgName), 'bundled rg')
+        [IO.File]::WriteAllText((Join-Path $bundle 'codex.exe'), 'must not be copied')
+        $result = Get-ReviewProcessPath -ToolDirectory $toolDirectory -PathValue "$inherited$separator$bundle" -UserPath $userTools -MachinePath '' -BundledBinRoot $bundleRoot
+        Assert-IsolatedSearchPath $result "$inherited$separator$bundle" 'bundled rg'
+        if ($env:PATH -cne $originalPath) { throw 'Discovery changed the caller PATH.' }
+        $repeated = Get-ReviewProcessPath -ToolDirectory $toolDirectory -PathValue $result -UserPath '' -MachinePath '' -BundledBinRoot $bundleRoot
+        if ($repeated -cne $result) { throw 'Repeated preparation added another PATH entry.' }
+    }
+    Test-Case 'review-path-skips-missing-drives-before-valid-fallbacks' {
+        . (Join-Path $package 'scripts/ReviewCliEnvironment.ps1')
+        $missingDrive = 65..90 | ForEach-Object { [string][char]$_ } |
+            Where-Object { -not (Get-PSDrive -Name $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1
+        if (-not $missingDrive) { throw 'Missing-drive fixture needs an unused drive letter.' }
+        $badPath = $missingDrive + ':\disconnected-tools'
+        $fallback = Join-Path $testRoot 'missing-drive fallback'
+        $toolDirectory = Join-Path $testRoot 'missing-drive isolated tools'
+        New-Item -ItemType Directory -Path $fallback | Out-Null
+        [IO.File]::WriteAllText((Join-Path $fallback $rgName), 'fallback rg')
+        foreach ($parameters in @(
+            @{ PathValue = "$badPath;$fallback"; UserPath = ''; MachinePath = '' },
+            @{ PathValue = $badPath; UserPath = $fallback; MachinePath = '' },
+            @{ PathValue = $badPath; UserPath = $badPath; MachinePath = $fallback }
+        )) {
+            $result = Get-ReviewProcessPath -ToolDirectory $toolDirectory -BundledBinRoot $badPath @parameters
+            Assert-IsolatedSearchPath $result $parameters.PathValue 'fallback rg'
+        }
+    }
+    Test-Case 'review-path-preserves-shared-folder-tool-precedence' {
+        . (Join-Path $package 'scripts/ReviewCliEnvironment.ps1')
+        $preferred = Join-Path $testRoot 'preferred tools'
+        $shared = Join-Path $testRoot 'shared shim folder'
+        $toolDirectory = Join-Path $testRoot 'precedence isolated tools'
+        New-Item -ItemType Directory -Path $preferred,$shared | Out-Null
+        foreach ($name in @('git.exe', 'pwsh.exe', 'codex.exe')) {
+            [IO.File]::WriteAllText((Join-Path $preferred $name), 'preferred')
+            [IO.File]::WriteAllText((Join-Path $shared $name), 'shadow')
+        }
+        [IO.File]::WriteAllText((Join-Path $shared $rgName), 'shared rg')
+        $priorPath = $env:PATH
+        try {
+            $env:PATH = "$preferred;$shared"
+            $inherited = $env:PATH
+            $result = Get-ReviewProcessPath -ToolDirectory $toolDirectory -UserPath '' -MachinePath '' -BundledBinRoot ''
+            Assert-IsolatedSearchPath $result $inherited 'shared rg'
+            $env:PATH = $result
+            foreach ($command in @('git', 'pwsh', 'codex')) {
+                $resolved = Get-Command $command -CommandType Application | Select-Object -First 1
+                if ($resolved.Source -ne (Join-Path $preferred "$command.exe")) { throw "$command was shadowed after adding rg." }
+            }
+        } finally { $env:PATH = $priorPath }
+    }
+    Test-Case 'review-launchers-provide-working-rg-without-leaking-path' {
+        . (Join-Path $package 'scripts/ReviewCliEnvironment.ps1')
+        $originalPath = $env:PATH
+        $probes = @{}
+        foreach ($launcher in @('wrapper', 'supervisor')) { $probes[$launcher] = New-Probe "rg-$launcher" @('-Mode', 'search') 'input' }
+        $bad = New-Probe 'rg-wrapper-failure' @('-Mode', 'fail') 'input'
+        $preferred = Join-Path $testRoot 'launcher preferred tools'
+        New-Item -ItemType Directory -Path $preferred | Out-Null
+        foreach ($name in @('git.exe', 'pwsh.exe', 'codex.exe')) { [IO.File]::WriteAllText((Join-Path $preferred $name), 'fixture') }
+        try {
+            $env:PATH = $preferred + [IO.Path]::PathSeparator + $originalPath
+            $inherited = $env:PATH
+            # pwsh itself prepends PSHOME at startup. Compare with an unwrapped
+            # child so shell initialization is not mistaken for launcher changes.
+            $baselineInvocation = Get-Content -LiteralPath $probes['wrapper'] -Raw | ConvertFrom-Json
+            $baselineArguments = @($baselineInvocation.arguments | ForEach-Object { [string]$_ })
+            $baseline = [string]$baselineInvocation.standard_input | & ([string]$baselineInvocation.executable) @baselineArguments
+            if ($LASTEXITCODE -ne 0) { throw 'Baseline child shell failed.' }
+            $baselineTools = @($baseline | Where-Object { $_ -match '^(git|pwsh|codex): ' })
+            if ($baselineTools.Count -ne 3) { throw 'Baseline tool resolutions were not captured.' }
+            foreach ($launcher in @('wrapper', 'supervisor')) {
+                $probe = $probes[$launcher]
+                if ($launcher -eq 'wrapper') {
+                    $output = (& $timedWrapper -InvocationPath $probe) -join "`n"
+                } else {
+                    & $runner -InvocationPath $probe -TimeoutSeconds 15 | Out-Null
+                    $output = Get-Content -LiteralPath ($probe + '.stdout') -Raw
+                }
+                if ($output -notmatch 'rg-tools' -or $output -notmatch 'ripgrep \d') { throw "$launcher did not provide a working isolated rg." }
+                foreach ($tool in $baselineTools) {
+                    if (-not $output.Contains([string]$tool)) { throw "$launcher changed tool resolution: $tool" }
+                }
+                if ($env:PATH -cne $inherited) { throw "$launcher leaked its child PATH into the caller." }
+            }
+            Expect-Failure { & $timedWrapper -InvocationPath $bad } 'exited 9'
+            if ($env:PATH -cne $inherited) { throw 'Failed wrapper invocation leaked PATH.' }
+        } finally { $env:PATH = $originalPath }
+    }
     Test-Case 'codex-home-resolution-order' {
         $names = @('CODEX_HOME', 'USERPROFILE', 'HOME')
         $prior = @{}

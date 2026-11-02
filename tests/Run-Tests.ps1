@@ -229,14 +229,16 @@ try {
         $defaultArguments = & $argumentsScript | ConvertFrom-Json
         $overrideArguments = & $argumentsScript -ReviewArguments @('pr', '1234', '--effort', 'xhigh') | ConvertFrom-Json
         $reversedArguments = & $argumentsScript -ReviewArguments @('--effort', 'low', 'pr', '42') | ConvertFrom-Json
-        if ($defaultArguments.effort -ne 'medium' -or $null -ne $defaultArguments.pull_request_id -or
-            $overrideArguments.effort -ne 'xhigh' -or $overrideArguments.pull_request_id -ne 1234 -or
-            $reversedArguments.effort -ne 'low' -or $reversedArguments.pull_request_id -ne 42) {
+        if ($defaultArguments.effort -ne 'medium' -or $defaultArguments.codex_effort -ne 'high' -or $null -ne $defaultArguments.pull_request_id -or
+            $overrideArguments.effort -ne 'xhigh' -or $overrideArguments.codex_effort -ne 'xhigh' -or $overrideArguments.pull_request_id -ne 1234 -or
+            $reversedArguments.effort -ne 'low' -or $reversedArguments.codex_effort -ne 'low' -or $reversedArguments.pull_request_id -ne 42) {
             throw 'Review argument parsing returned the wrong scope or effort.'
         }
+        $mediumArguments = & $argumentsScript -ReviewArguments @('--effort', 'medium') | ConvertFrom-Json
+        if ($mediumArguments.effort -ne 'medium' -or $mediumArguments.codex_effort -ne 'medium') { throw 'Explicit medium did not override the Codex high default.' }
         $debugOnly = & $argumentsScript -ReviewArguments @('--debug') | ConvertFrom-Json
         if ($defaultArguments.debug -isnot [bool] -or $defaultArguments.debug -or
-            $debugOnly.debug -ne $true -or $debugOnly.effort -ne 'medium' -or $null -ne $debugOnly.pull_request_id) {
+            $debugOnly.debug -ne $true -or $debugOnly.effort -ne 'medium' -or $debugOnly.codex_effort -ne 'high' -or $null -ne $debugOnly.pull_request_id) {
             throw 'Debug must default to false and be enabled by --debug without changing scope or effort.'
         }
         foreach ($tokens in @(
@@ -245,7 +247,7 @@ try {
             @('pr', '1234', '--effort', 'high', '--debug')
         )) {
             $debugArguments = & $argumentsScript -ReviewArguments $tokens | ConvertFrom-Json
-            if ($debugArguments.debug -ne $true -or $debugArguments.pull_request_id -ne 1234 -or $debugArguments.effort -ne 'high') {
+            if ($debugArguments.debug -ne $true -or $debugArguments.pull_request_id -ne 1234 -or $debugArguments.effort -ne 'high' -or $debugArguments.codex_effort -ne 'high') {
                 throw 'Debug parsing must compose with PR and effort arguments in any order.'
             }
         }
@@ -604,10 +606,12 @@ try {
             throw 'PR invocation arguments are incorrect'
         }
         if (@($xhighInvocation.arguments) -notcontains 'model_reasoning_effort="xhigh"') { throw 'Codex xhigh override was not passed to the CLI' }
-        if (($branchArguments -join '|') -ne ('exec|--cd|{1}|--sandbox|read-only|--ephemeral|review|--base|{0}|--output-last-message|C:\temp\codex-branch.md' -f $branchBaseCommit, $reviewWorkspace)) {
+        $mediumInvocation = & $codexInvocationScript -ReviewMode uncommitted -WorkingDirectory $reviewWorkspace -OutputPath 'C:\temp\codex-medium.md' -ReasoningEffort medium | ConvertFrom-Json
+        if (@($mediumInvocation.arguments) -notcontains 'model_reasoning_effort="medium"' -or @($mediumInvocation.arguments) -contains 'model_reasoning_effort="high"') { throw 'Explicit Codex medium did not override high.' }
+        if (($branchArguments -join '|') -ne ('exec|--cd|{1}|--sandbox|read-only|--ephemeral|-c|model_reasoning_effort="high"|review|--base|{0}|--output-last-message|C:\temp\codex-branch.md' -f $branchBaseCommit, $reviewWorkspace)) {
             throw 'branch invocation arguments are incorrect'
         }
-        if (($uncommittedArguments -join '|') -ne ('exec|--cd|{0}|--sandbox|read-only|--ephemeral|review|--uncommitted|--output-last-message|C:\temp\codex-uncommitted.md' -f $reviewWorkspace)) {
+        if (($uncommittedArguments -join '|') -ne ('exec|--cd|{0}|--sandbox|read-only|--ephemeral|-c|model_reasoning_effort="high"|review|--uncommitted|--output-last-message|C:\temp\codex-uncommitted.md' -f $reviewWorkspace)) {
             throw 'uncommitted invocation arguments are incorrect'
         }
         $script:passed++
@@ -1741,12 +1745,14 @@ exit $Code
         $comparisonInputs = @('claude.md', 'codex.md', 'context.json') | ForEach-Object { Join-Path $timingRoot $_ }
         foreach ($inputPath in $comparisonInputs) { [System.IO.File]::WriteAllText($inputPath, 'fixture') }
         $outputReportPath = Join-Path $timingRoot 'codex-evaluation.md'
-        $comparison = & $comparisonBuilderScript -WorkingDirectory $timingRoot -ClaudeReviewPath $comparisonInputs[0] -CodexReviewPath $comparisonInputs[1] -RunContextPath $comparisonInputs[2] -OutputPath $outputReportPath -Model 'fixture-model' -ReasoningEffort high | ConvertFrom-Json
+        $comparison = & $comparisonBuilderScript -WorkingDirectory $timingRoot -ClaudeReviewPath $comparisonInputs[0] -CodexReviewPath $comparisonInputs[1] -RunContextPath $comparisonInputs[2] -OutputPath $outputReportPath -Model 'fixture-model' | ConvertFrom-Json
         $comparisonArguments = @($comparison.arguments | ForEach-Object { [string]$_ })
         if ($comparisonArguments -contains 'review' -or $comparisonArguments[0] -ne 'exec' -or $comparisonArguments[-1] -ne '-' -or
             $comparisonArguments -notcontains 'read-only' -or $comparisonArguments -notcontains '--ephemeral' -or
             $comparisonArguments -notcontains $outputReportPath -or $comparisonArguments -notcontains 'model_reasoning_effort="high"' -or
             $comparisonArguments -notcontains 'fixture-model') { throw 'comparison arguments are incorrect' }
+        $mediumComparison = & $comparisonBuilderScript -WorkingDirectory $timingRoot -ClaudeReviewPath $comparisonInputs[0] -CodexReviewPath $comparisonInputs[1] -RunContextPath $comparisonInputs[2] -OutputPath $outputReportPath -ReasoningEffort medium | ConvertFrom-Json
+        if (@($mediumComparison.arguments) -notcontains 'model_reasoning_effort="medium"' -or @($mediumComparison.arguments) -contains 'model_reasoning_effort="high"') { throw 'Explicit comparison medium did not override high.' }
         foreach ($expected in @('Cross-review comparison pass', 'run the reuse check', 'Reuse timing:', 'Input paths (data):')) {
             if (-not ([string]$comparison.standard_input).Contains($expected)) { throw "comparison prompt is missing: $expected" }
         }
