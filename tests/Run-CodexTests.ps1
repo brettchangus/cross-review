@@ -254,13 +254,22 @@ try {
                 $invocation.arguments -notcontains 'dontAsk' -or $invocation.arguments -notcontains 'fixture-model' -or
                 $invocation.arguments -contains '--dangerously-skip-permissions' -or $invocation.arguments -contains '--resume') { throw 'Incorrect Claude settings' }
             if ($mode -ne 'uncommitted' -and -not $invocation.standard_input.Contains($scopeBase + '...HEAD')) { throw 'Frozen diff scope missing' }
-            if (-not $invocation.standard_input.Contains("git diff '@{upstream}...HEAD'") -or
-                -not $invocation.standard_input.Contains("git rev-parse 'HEAD^{commit}'")) { throw 'Quoted revision guidance missing' }
+            # A bare commit ID makes native code-review review that single commit instead of the selected change.
+            if ($mode -ne 'uncommitted' -and -not $invocation.standard_input.Contains("args=`"medium Review exactly the output of git diff '$scopeBase...HEAD'")) { throw 'Native review arguments must state the frozen diff, not a bare commit' }
+            # A forked native skill cannot see guidance outside its actual arguments.
+            $nativeArgumentsMatch = [regex]::Match($invocation.standard_input, 'args="([^"]+)"')
+            if (-not $nativeArgumentsMatch.Success) { throw 'Native skill arguments missing' }
+            $nativeArguments = $nativeArgumentsMatch.Groups[1].Value
+            foreach ($required in @('Run one command per call', 'Single-quote Git revision arguments and ranges',
+                'retry the same in-scope operation as separate commands with quoted revisions',
+                'Pass these instructions to any review subagents', 'do not modify files, run tests/builds', 'Do not discover a PR')) {
+                if (-not $nativeArguments.Contains($required)) { throw "Forked native review lost guidance: $required" }
+            }
             if ($mode -eq 'uncommitted') {
-                if (-not $invocation.standard_input.Contains("git diff 'HEAD' -- .") -or
-                    -not $invocation.standard_input.Contains('git status --porcelain=v1 --untracked-files=all') -or
-                    -not $invocation.standard_input.Contains('Do not query upstream/tracking refs') -or
-                    -not $invocation.standard_input.Contains('Pass this scope and these command instructions to any native review subagents.')) { throw 'Uncommitted-only scope guidance missing' }
+                if (-not $nativeArguments.Contains("git diff 'HEAD' -- .") -or
+                    -not $nativeArguments.Contains('git status --porcelain=v1 --untracked-files=all') -or
+                    -not $nativeArguments.Contains('Do not query upstream/tracking refs') -or
+                    -not $nativeArguments.Contains('Pass this scope and these command instructions to any native review subagents.')) { throw 'Uncommitted-only scope guidance missing from native arguments' }
             } elseif ($invocation.standard_input.Contains('Do not query upstream/tracking refs')) { throw 'Uncommitted-only restriction leaked into branch/PR review' }
             # Chained commands are denied unless every part is separately allowed.
             if (-not $invocation.standard_input.Contains('Run one command per call')) { throw 'Single-command guidance missing' }
@@ -274,8 +283,8 @@ try {
         Expect-Failure { & $builder -Stage independent -WorkingDirectory $scopeRepo -ReviewMode branch -BaseCommit $scopeBase -AllowedToolsPath $allowedToolsPath } 'requires a clean workspace'
         foreach ($mode in @('branch', 'pull_request')) {
             $combined = & $builder -Stage independent -WorkingDirectory $scopeRepo -ReviewMode $mode -BaseCommit $scopeBase -IncludeLocalChanges -AllowedToolsPath $allowedToolsPath | ConvertFrom-Json
-            if (-not $combined.standard_input.Contains("git diff '<merge-base>' (replace the placeholder with the returned hash, without ...HEAD)") -or
-                -not $combined.standard_input.Contains('including all staged local changes')) { throw 'Combined scope omitted local changes.' }
+            if (-not $combined.standard_input.Contains("args=`"medium Review exactly the output of git diff '$scopeBase' in the current working directory, which includes all staged local changes.") -or
+                -not $combined.standard_input.Contains("the combined branch and local diff from git diff '$scopeBase' (without ...HEAD)")) { throw 'Combined scope omitted local changes.' }
         }
     }
     Test-Case 'claude-comparison-inputs' {
@@ -287,7 +296,7 @@ try {
         if (-not $invocation.standard_input.Contains('Run one command per call')) { throw 'Single-command guidance missing' }
         $comparisonAllowed = [string]$invocation.arguments[[Array]::IndexOf([object[]]$invocation.arguments, '--allowedTools') + 1]
         if (-not $comparisonAllowed.Contains('Bash(date +%s%3N)')) { throw 'Comparison cannot read the reuse timing clock' }
-        if (-not $invocation.standard_input.Contains("git diff '@{upstream}...HEAD'")) { throw 'Comparison revision quoting guidance missing' }
+        if (-not $invocation.standard_input.Contains('Single-quote Git revision arguments and ranges')) { throw 'Comparison revision quoting guidance missing' }
         if (-not $invocation.standard_input.Contains('run the reuse check') -or -not $invocation.standard_input.Contains('Reuse: R-001')) { throw 'Reuse check missing from comparison prompt' }
         Expect-Failure { & $builder -Stage comparison -WorkingDirectory $testRoot -ClaudeReviewPath 'relative.md' -AllowedToolsPath $allowedToolsPath } 'existing absolute'
     }

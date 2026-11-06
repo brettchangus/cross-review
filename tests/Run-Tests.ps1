@@ -545,7 +545,15 @@ try {
         $exitCalls = @([regex]::Matches($skillText, 'ExitWorktree'))
         $removalCalls = @([regex]::Matches($skillText, 'Remove-ReviewWorkspace\.ps1'))
         if ($exitCalls.Count -lt 2 -or $removalCalls.Count -lt 2) {
-            throw 'the skill must name both ExitWorktree and the removal script in the invariants and in the final step'
+            throw 'the skill must name both ExitWorktree and the removal script in the invariants and in the workflow steps'
+        }
+        # Write and Edit refuse original-checkout paths while the session is in a worktree, so the
+        # session must leave between the native review and the first artifact it writes.
+        $entryIndex = $skillText.IndexOf('using `EnterWorktree` with `path`')
+        $firstArtifactIndex = $skillText.IndexOf('Write `claude-review.md`')
+        if ($entryIndex -lt 0 -or $firstArtifactIndex -lt $entryIndex -or
+            $skillText.IndexOf('ExitWorktree', $entryIndex, $firstArtifactIndex - $entryIndex) -lt 0) {
+            throw 'the session must leave the worktree with ExitWorktree after the native review and before writing artifacts'
         }
         if ($exitCalls[0].Index -gt $removalCalls[0].Index) {
             throw 'post-entry cleanup must return the session with ExitWorktree before removing the worktree'

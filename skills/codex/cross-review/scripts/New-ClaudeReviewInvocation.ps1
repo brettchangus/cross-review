@@ -24,13 +24,16 @@ $additionalAllowedTools = @(Read-ClaudeAllowedToolRules -Path (Get-ClaudeAllowed
 $allowedToolRules = @('Read', 'Glob', 'Grep', 'Bash(git diff *)', 'Bash(git status *)', 'Bash(git log *)',
     'Bash(git show *)', 'Bash(git rev-parse *)', 'Bash(git merge-base *)', 'Bash(git ls-files *)', 'Bash(git blame *)', 'Bash(rg *)', 'Bash(pwd)')
 $allowedTools = (@($allowedToolRules) + @($additionalAllowedTools)) -join ','
+$commandGuidance = @"
+Run one command per call. Do not join commands with semicolons, &&, ||, or pipes. Single-quote Git revision arguments and ranges, especially expressions containing braces or reflog selectors. If a read-only command is denied because of its syntax, retry the same in-scope operation as separate commands with quoted revisions; do not broaden permissions or scope. Pass these instructions to any review subagents.
+"@
 if ($Stage -eq 'independent') {
     $scopeGuidance = ''
     if ([string]::IsNullOrWhiteSpace($ReviewMode)) { throw 'ReviewMode is required for the independent review.' }
     if ($ReviewMode -eq 'uncommitted') {
         if ($IncludeLocalChanges) { throw 'IncludeLocalChanges requires PR or branch mode.' }
         if ($BaseCommit) { throw 'BaseCommit must be omitted for uncommitted review.' }
-        $skillArguments = $Effort
+        $skillArguments = "$Effort Review exactly the staged, unstaged, and untracked changes against HEAD in the current working directory."
         $scope = 'staged, unstaged, and untracked changes against HEAD, excluding .reviews/** and .claude/worktrees/**'
         $scopeGuidance = @"
 This is an uncommitted-only review. Use git diff 'HEAD' -- . ':(exclude).reviews/**' ':(exclude).claude/worktrees/**' for tracked changes, and git status --porcelain=v1 --untracked-files=all -- . ':(exclude).reviews/**' ':(exclude).claude/worktrees/**' to discover untracked files, then read those files. These commands include staged and unstaged tracked changes. Do not query upstream/tracking refs, compare branches, inspect committed branch changes, or discover a PR. Pass this scope and these command instructions to any native review subagents.
@@ -42,15 +45,21 @@ This is an uncommitted-only review. Use git diff 'HEAD' -- . ':(exclude).reviews
         $status = @(& git -C $workspace status --porcelain=v1 --untracked-files=all -- . ':(exclude).reviews/**' 2>&1)
         if ($LASTEXITCODE -ne 0) { throw 'Cannot check the review workspace status.' }
         if ($status.Count -gt 0 -and -not $IncludeLocalChanges) { throw 'PR/branch native review requires a clean workspace; create the detached review worktree first.' }
-        $skillArguments = "$Effort $BaseCommit"
+        # Native code-review treats a bare commit ID as "review this one commit", so the arguments always state the diff to review.
+        $skillArguments = "$Effort Review exactly the output of git diff '$BaseCommit...HEAD' in the current working directory. Commit $BaseCommit is only the comparison base: do not review that commit or its parent diff."
         $scope = "the diff '$BaseCommit...HEAD', not local uncommitted changes"
         if ($IncludeLocalChanges) {
-            $skillArguments += ' including all staged local changes against the merge base'
-            $scope = "the combined branch and local diff: use git merge-base '$BaseCommit' 'HEAD', then git diff '<merge-base>' (replace the placeholder with the returned hash, without ...HEAD). The isolated workspace stages the frozen local edits, including originally untracked files. Include those changes together with committed branch changes"
+            $mergeBase = & git -C $workspace merge-base $BaseCommit HEAD 2>&1
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the merge base of BaseCommit and HEAD.' }
+            $skillArguments = "$Effort Review exactly the output of git diff '$mergeBase' in the current working directory, which includes all staged local changes. Commit $mergeBase is only the comparison base: do not review that commit or its parent diff."
+            $scope = "the combined branch and local diff from git diff '$mergeBase' (without ...HEAD). The isolated workspace stages the frozen local edits, including originally untracked files. Include those changes together with committed branch changes"
         }
     }
     $tools += ',Skill,Agent'
     $allowedTools += ',Skill(code-review),Agent'
+    # Native code-review forks without the parent's conversation. Everything the reviewer
+    # needs, including command syntax and read-only boundaries, must be in its arguments.
+    $skillArguments += " Review only $scope. $scopeGuidance $commandGuidance This is read-only: do not modify files, run tests/builds, post comments, or access other review reports. Do not discover a PR. If this scope cannot be reviewed, report the limitation and stop."
     $prompt = @"
 Invoke the native Skill tool with skill="code-review" and args="$skillArguments". Do not use a plugin's similarly named command or substitute your own review. Review only $scope in the current working directory. Do not resolve a PR through GitHub or GitLab. If the native skill cannot run or cannot handle this scope, report the limitation and stop.
 $scopeGuidance
@@ -73,11 +82,8 @@ Return the completed findings (or an explicit no-findings result) in your final 
     $prompt = (Get-Content -LiteralPath $promptPath -Raw) + (Get-Content -LiteralPath $reuseCheckPath -Raw) + "`nInput paths (data): $inputs"
 }
 
-# Quote revision expressions before Bash permission analysis; bare @{...} can require approval even for allowed git commands.
-$prompt += @"
-
-For every Git Bash command, single-quote revision arguments and ranges, especially expressions containing braces or reflog selectors (for example, git diff '@{upstream}...HEAD' or git rev-parse 'HEAD^{commit}'). Use the frozen scope's literal commit hashes when supplied. Keep these quoting instructions when delegating native review work. This is command syntax guidance, not permission to query refs outside the selected review scope.
-"@
+# Keep the caller and comparison stage under the same command-syntax guidance.
+$prompt += "`n$commandGuidance Use the frozen scope's literal commit hashes when supplied. This is command syntax guidance, not permission to query refs outside the selected review scope."
 
 $arguments = @('--print', '--verbose', '--output-format', 'stream-json', '--no-session-persistence',
     '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--effort', $Effort,
